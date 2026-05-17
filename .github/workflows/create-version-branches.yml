@@ -1,7 +1,7 @@
 name: Build KernelSU LKM
 
 on:
-  workflow_dispatch: # This gives you the manual "Run workflow" button in GitHub Actions
+  workflow_dispatch: # Allows you to manually trigger the build with a button
 
 permissions:
   contents: write
@@ -26,7 +26,8 @@ jobs:
       - name: Compile Module
         run: |
           cd KernelSU/kernel
-          make
+          # Added flags to force compilation of the driver module using Clang
+          CONFIG_KSU=m CC=clang make
           
       - name: Upload Finished Module File
         uses: actions/upload-artifact@v4
