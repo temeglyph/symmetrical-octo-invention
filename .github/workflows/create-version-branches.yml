@@ -7,6 +7,42 @@ jobs:
   build-kernel:
     runs-on: ubuntu-latest
     steps:
+      # ============================================================
+      # STEP 0: Grab the stock ramdisk BEFORE cleanup deletes the SDK
+      # ============================================================
+      - name: Save Stock Ramdisk Before Cleanup
+        run: |
+          echo "=== Searching for stock ramdisk.img in pre-installed Android SDK ==="
+          FOUND=""
+
+          # GitHub runners have Android SDK at ANDROID_HOME or /usr/local/lib/android/sdk
+          for base in "$ANDROID_HOME" "$ANDROID_SDK_ROOT" "/usr/local/lib/android/sdk"; do
+            if [ -d "$base/system-images" ]; then
+              echo "Searching in: $base/system-images/"
+              find "$base/system-images" -name "ramdisk.img" -type f 2>/dev/null | while read f; do
+                echo "  Found: $f ($(wc -c < "$f") bytes)"
+              done
+
+              # Prefer API 34 x86_64, but accept any x86_64 ramdisk
+              for candidate in \
+                "$base/system-images/android-34/google_apis/x86_64/ramdisk.img" \
+                "$base/system-images/android-34/default/x86_64/ramdisk.img" \
+                $(find "$base/system-images" -path "*/x86_64/ramdisk.img" -type f 2>/dev/null | head -3); do
+                if [ -f "$candidate" ]; then
+                  FOUND="$candidate"
+                  break 2
+                fi
+              done
+            fi
+          done
+
+          if [ -n "$FOUND" ]; then
+            cp "$FOUND" /tmp/stock_ramdisk.img
+            echo "✅ Saved stock ramdisk from SDK: $FOUND ($(wc -c < /tmp/stock_ramdisk.img) bytes)"
+          else
+            echo "⚠️ No stock ramdisk found in pre-installed SDK (will download later)"
+          fi
+
       - name: Maximize Build Space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
@@ -35,65 +71,72 @@ jobs:
       - name: Compile Native x86_64 Emulator Kernel
         run: |
           cd kernel_workspace
-          # Uses the proven build target that produces bzImage + initramfs.img
           tools/bazel run //common-modules/virtual-device:virtual_device_x86_64_dist -- --dist_dir=out/dist
 
-      - name: Download Stock Android 14 x86_64 Ramdisk
+      # ============================================================
+      # STEP: Get stock ramdisk (from pre-save or download)
+      # ============================================================
+      - name: Obtain Stock Ramdisk
         run: |
           set -e
-          mkdir -p stock_work
 
-          # Download the official Google API system image for API 34 x86_64
-          # This contains the stock ramdisk.img with Android's first_stage_init
-          echo "Downloading stock Android 14 x86_64 system image..."
-
-          # Use the Android SDK commandline-tools if available on the runner
-          if command -v sdkmanager &>/dev/null; then
-            yes | sdkmanager --install "system-images;android-34;google_apis;x86_64" 2>/dev/null || true
+          # Check if we saved it before cleanup
+          if [ -f /tmp/stock_ramdisk.img ]; then
+            cp /tmp/stock_ramdisk.img stock_ramdisk.img
+            echo "✅ Using pre-saved stock ramdisk: $(wc -c < stock_ramdisk.img) bytes"
+            exit 0
           fi
 
-          # Find the stock ramdisk from the SDK
-          STOCK_RAMDISK=""
-          for path in \
-            "$ANDROID_HOME/system-images/android-34/google_apis/x86_64/ramdisk.img" \
-            "$ANDROID_SDK_ROOT/system-images/android-34/google_apis/x86_64/ramdisk.img" \
-            "/usr/local/lib/android/sdk/system-images/android-34/google_apis/x86_64/ramdisk.img"; do
-            if [ -f "$path" ]; then
-              STOCK_RAMDISK="$path"
+          echo "No pre-saved ramdisk. Downloading from Google..."
+          mkdir -p stock_work && cd stock_work
+
+          # Try downloading the system image zip
+          DOWNLOADED=false
+          for url in \
+            "https://dl.google.com/android/repository/sys-img/google_apis/x86_64-34_r13.zip" \
+            "https://dl.google.com/android/repository/sys-img/google_apis/x86_64-34_r12.zip" \
+            "https://dl.google.com/android/repository/sys-img/google_apis/x86_64-34_r11.zip"; do
+            echo "Trying: $url"
+            if curl -fSL -o sysimg.zip "$url" 2>/dev/null; then
+              echo "Download successful! Size: $(wc -c < sysimg.zip) bytes"
+              DOWNLOADED=true
               break
             fi
           done
 
-          # Fallback: try direct download from Google's repository
-          if [ -z "$STOCK_RAMDISK" ]; then
-            echo "SDK ramdisk not found, trying direct download..."
-            cd stock_work
-            # Try multiple known URLs for the system image
-            for url in \
-              "https://dl.google.com/android/repository/sys-img/google_apis/x86_64-34_r13.zip" \
-              "https://dl.google.com/android/repository/sys-img/google_apis/x86_64-34_r12.zip" \
-              "https://dl.google.com/android/repository/sys-img/google_apis/x86_64-34_r11.zip"; do
-              echo "Trying: $url"
-              if curl -fSL -o sysimg.zip "$url" 2>/dev/null; then
-                echo "Download successful!"
-                break
-              fi
-            done
-            if [ -f sysimg.zip ]; then
-              unzip -q -o sysimg.zip "*/ramdisk.img" -d extracted/ 2>/dev/null || true
-              STOCK_RAMDISK=$(find extracted/ -name "ramdisk.img" -type f | head -1)
-            fi
-            cd ..
-          fi
-
-          if [ -n "$STOCK_RAMDISK" ] && [ -f "$STOCK_RAMDISK" ]; then
-            cp "$STOCK_RAMDISK" stock_ramdisk.img
-            echo "✅ Stock ramdisk obtained: $(wc -c < stock_ramdisk.img) bytes"
-          else
-            echo "❌ Could not obtain stock ramdisk!"
+          if [ "$DOWNLOADED" = false ]; then
+            echo "❌ All download URLs failed!"
             exit 1
           fi
 
+          # Extract WITHOUT path filters — just unzip everything, then find the file
+          echo "Extracting zip (full contents)..."
+          unzip -o sysimg.zip -d extracted/
+          echo ""
+          echo "All files in extracted zip:"
+          find extracted/ -type f -name "*.img" | sort
+          echo ""
+
+          # Find ramdisk.img
+          STOCK_RAMDISK=$(find extracted/ -name "ramdisk.img" -type f | head -1)
+
+          if [ -n "$STOCK_RAMDISK" ] && [ -f "$STOCK_RAMDISK" ]; then
+            cp "$STOCK_RAMDISK" ../stock_ramdisk.img
+            echo "✅ Stock ramdisk extracted: $STOCK_RAMDISK ($(wc -c < ../stock_ramdisk.img) bytes)"
+          else
+            echo "❌ ramdisk.img not found in zip!"
+            echo "Zip contents:"
+            find extracted/ -type f | sort
+            exit 1
+          fi
+
+          cd ..
+          # Clean up the large zip to free disk space
+          rm -rf stock_work
+
+      # ============================================================
+      # STEP: Merge kernel modules into stock ramdisk
+      # ============================================================
       - name: Merge Kernel Modules into Stock Ramdisk
         run: |
           set -e
@@ -115,11 +158,8 @@ jobs:
           MAGIC_HEX=$(xxd -l 4 -p "$INITRAMFS")
           echo "    initramfs magic bytes: $MAGIC_HEX"
 
-          if [[ "$MAGIC_HEX" == 04224d18* ]]; then
-            echo "    Format: LZ4 (standard frame)"
-            lz4 -dc "$INITRAMFS" | cpio -idm --quiet
-          elif [[ "$MAGIC_HEX" == 02214c18* ]]; then
-            echo "    Format: LZ4 (legacy)"
+          if [[ "$MAGIC_HEX" == 04224d18* ]] || [[ "$MAGIC_HEX" == 02214c18* ]]; then
+            echo "    Format: LZ4"
             lz4 -dc "$INITRAMFS" | cpio -idm --quiet
           elif [[ "$MAGIC_HEX" == 1f8b* ]]; then
             echo "    Format: gzip"
@@ -128,10 +168,10 @@ jobs:
             echo "    Format: zstd"
             zstd -dc "$INITRAMFS" | cpio -idm --quiet
           elif [[ "$MAGIC_HEX" == 30373037* ]]; then
-            echo "    Format: raw cpio (uncompressed)"
+            echo "    Format: raw cpio"
             cpio -idm --quiet < "$INITRAMFS"
           else
-            echo "    Format: unknown, trying lz4 then gzip then raw..."
+            echo "    Format: unknown ($MAGIC_HEX), trying all decompressors..."
             lz4 -dc "$INITRAMFS" 2>/dev/null | cpio -idm --quiet 2>/dev/null || \
             gzip -dc "$INITRAMFS" 2>/dev/null | cpio -idm --quiet 2>/dev/null || \
             cpio -idm --quiet < "$INITRAMFS" 2>/dev/null || true
@@ -143,26 +183,24 @@ jobs:
           echo "    Total .ko files: $KO_COUNT"
 
           if [ "$KO_COUNT" -eq 0 ]; then
-            echo "    ❌ ERROR: No kernel modules found in initramfs!"
+            echo "    ❌ No kernel modules in initramfs!"
             echo "    Full contents:"
             find . -type f | sort | sed 's/^/      /'
             exit 1
           fi
-
-          echo "    modules.load files:"
-          find . -name "modules.load" | sed 's/^/      /'
-          echo ""
           cd ../..
 
           # --- Step 2: Extract the stock ramdisk (contains Android init) ---
+          echo ""
           echo ">>> Step 2: Extracting stock ramdisk.img..."
           mkdir -p work/stock
           cd work/stock
 
           STOCK="../../stock_ramdisk.img"
           STOCK_MAGIC=$(xxd -l 4 -p "$STOCK")
-          echo "    stock ramdisk magic: $STOCK_MAGIC"
+          echo "    Magic bytes: $STOCK_MAGIC"
 
+          REPACK_FORMAT="lz4"
           if [[ "$STOCK_MAGIC" == 04224d18* ]] || [[ "$STOCK_MAGIC" == 02214c18* ]]; then
             lz4 -dc "$STOCK" | cpio -idm --quiet
             REPACK_FORMAT="lz4"
@@ -170,56 +208,57 @@ jobs:
             gzip -dc "$STOCK" | cpio -idm --quiet
             REPACK_FORMAT="gzip"
           else
+            lz4 -dc "$STOCK" 2>/dev/null | cpio -idm --quiet 2>/dev/null || \
+            gzip -dc "$STOCK" 2>/dev/null | cpio -idm --quiet 2>/dev/null || \
             cpio -idm --quiet < "$STOCK" 2>/dev/null || true
-            REPACK_FORMAT="lz4"
           fi
 
-          echo "    Stock ramdisk top-level contents:"
+          echo "    Stock ramdisk contents:"
           ls -la | sed 's/^/      /'
-          echo "    Stock /init present: $([ -f init ] && echo 'YES ✅' || echo 'NO ❌')"
-          echo "    Stock /lib/modules present: $([ -d lib/modules ] && echo 'YES' || echo 'NO (will create)')"
-          echo ""
+          echo "    /init present: $([ -f init ] && echo 'YES ✅' || echo 'NO ❌')"
+          echo "    /lib/modules exists: $([ -d lib/modules ] && echo 'YES' || echo 'NO (will create)')"
           cd ../..
 
           # --- Step 3: Merge ---
-          echo ">>> Step 3: Merging..."
+          echo ""
+          echo ">>> Step 3: Merging modules into stock ramdisk..."
           mkdir -p work/merged
 
-          # Start with stock ramdisk as the base (has Android init)
+          # Copy stock ramdisk as base (preserves Android's init)
           cp -a work/stock/. work/merged/
 
-          # Create the modules directory in the merged ramdisk
+          # Create modules directory
           mkdir -p work/merged/lib/modules
 
-          # Copy ALL .ko module files from the built initramfs
-          echo "    Copying kernel modules..."
+          # Copy all .ko files from built initramfs
+          echo "    Copying kernel modules:"
           find work/built -name "*.ko" | while read ko; do
             BASENAME=$(basename "$ko")
             cp "$ko" "work/merged/lib/modules/$BASENAME"
             echo "      + $BASENAME"
           done
 
-          # Copy module metadata (modules.dep, modules.alias, etc.)
-          echo "    Copying module metadata..."
+          # Copy module metadata files
+          echo "    Copying module metadata:"
           find work/built -maxdepth 5 \( -name "modules.dep" -o -name "modules.softdep" -o -name "modules.alias" -o -name "modules.options" -o -name "modules.load" \) | while read meta; do
             BASENAME=$(basename "$meta")
             cp "$meta" "work/merged/lib/modules/$BASENAME"
             echo "      + $BASENAME"
           done
 
-          # If no modules.load was copied, generate one with correct dependency order
+          # Generate modules.load if not copied (with correct VirtIO load order)
           if [ ! -f work/merged/lib/modules/modules.load ]; then
-            echo "    Generating modules.load (no existing one found)..."
+            echo "    Generating modules.load..."
             {
-              # VirtIO core MUST load first
+              # VirtIO core must load first
               for m in virtio.ko virtio_ring.ko; do
                 [ -f "work/merged/lib/modules/$m" ] && echo "$m"
               done
-              # VirtIO PCI transport (required before any virtio device driver)
+              # PCI transport before device drivers
               for m in virtio_pci_modern_dev.ko virtio_pci_legacy_dev.ko virtio_pci.ko; do
                 [ -f "work/merged/lib/modules/$m" ] && echo "$m"
               done
-              # VirtIO device drivers (block device is critical for root mount)
+              # Critical device drivers
               for m in virtio_blk.ko virtio_net.ko virtio_console.ko virtio_input.ko virtio_balloon.ko virtio_mmio.ko; do
                 [ -f "work/merged/lib/modules/$m" ] && echo "$m"
               done
@@ -231,44 +270,33 @@ jobs:
           fi
 
           echo ""
-          echo "    Final modules.load:"
+          echo "    modules.load:"
           cat work/merged/lib/modules/modules.load | sed 's/^/      /'
-          echo ""
 
-          # Verify critical modules exist
-          echo "    Critical module check:"
+          # --- Verify ---
+          echo ""
+          echo ">>> Verification:"
           for critical in virtio_blk.ko virtio_pci.ko; do
             if [ -f "work/merged/lib/modules/$critical" ]; then
-              echo "      ✅ $critical present"
+              echo "    ✅ $critical"
             else
-              echo "      ❌ $critical MISSING — emulator will not boot!"
+              echo "    ❌ $critical MISSING"
             fi
           done
-
-          # Verify init is present
-          if [ -f work/merged/init ]; then
-            echo "      ✅ /init present (Android first_stage_init)"
-          else
-            echo "      ❌ /init MISSING — this is fatal!"
-            exit 1
-          fi
-          echo ""
+          [ -f work/merged/init ] && echo "    ✅ /init (Android first_stage_init)" || echo "    ❌ /init MISSING"
 
           # --- Step 4: Repack ---
-          echo ">>> Step 4: Repacking merged ramdisk (format: $REPACK_FORMAT)..."
+          echo ""
+          echo ">>> Step 4: Repacking (format: $REPACK_FORMAT)..."
           cd work/merged
-
           if [ "$REPACK_FORMAT" = "gzip" ]; then
             find . | cpio -o -H newc --quiet | gzip -9 > ../../merged_ramdisk.img
           else
             find . | cpio -o -H newc --quiet | lz4 -l -12 --favor-decSpeed > ../../merged_ramdisk.img
           fi
-
           cd ../..
 
           echo ""
-          echo "============================================"
-          echo "  Build Complete! File sizes:"
           echo "============================================"
           printf "  %-25s %s bytes\n" "Stock ramdisk:" "$(wc -c < stock_ramdisk.img)"
           printf "  %-25s %s bytes\n" "Built initramfs:" "$(wc -c < kernel_workspace/out/dist/initramfs.img)"
@@ -280,24 +308,13 @@ jobs:
         run: |
           mkdir -p final_output
 
-          # The two files you need to drop into the emulator's system-images folder:
+          # Ready-to-deploy files (drop these into your SDK system-images folder)
           cp kernel_workspace/out/dist/bzImage final_output/kernel-ranchu
           cp merged_ramdisk.img final_output/ramdisk.img
 
-          # Raw build artifacts (for debugging if needed)
+          # Raw build artifacts (for debugging)
           cp kernel_workspace/out/dist/bzImage final_output/bzImage
           cp kernel_workspace/out/dist/initramfs.img final_output/initramfs.img
-
-          echo ""
-          echo "============================================"
-          echo "  DEPLOYMENT INSTRUCTIONS"
-          echo "============================================"
-          echo "  1. Download the artifact zip"
-          echo "  2. Backup your originals in:"
-          echo "     C:\\Users\\<you>\\AppData\\Local\\Android\\Sdk\\system-images\\android-34\\google_apis\\x86_64\\"
-          echo "  3. Copy kernel-ranchu and ramdisk.img into that folder"
-          echo "  4. Launch: emulator -avd <name> -no-snapshot-load -show-kernel"
-          echo "============================================"
 
       - name: Upload Finished Artifacts
         uses: actions/upload-artifact@v4
