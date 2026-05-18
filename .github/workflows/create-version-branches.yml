@@ -30,6 +30,10 @@ jobs:
         run: |
           cd kernel_workspace/common
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+          # Forcefully lobotomize the strict x86_64 hardware security checks
+          sed -i 's/#ifndef X86_FEATURE_INDIRECT_SAFE/#if 0/g' drivers/kernelsu/core/init.c
+          sed -i 's/if (!boot_cpu_has(X86_FEATURE_INDIRECT_SAFE))/if (0)/g' drivers/kernelsu/core/init.c
+          
           
       - name: Compile Native x86_64 Kernel
         run: |
