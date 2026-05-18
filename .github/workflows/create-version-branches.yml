@@ -317,6 +317,10 @@ jobs:
                 find "$KVER_DIR" -name "$m" -printf "%P\n" 2>/dev/null
               done
             } > "$KVER_DIR/modules.load"
+            
+            KVER=$(basename "$KVER_DIR")
+            echo "    Running depmod to generate modules.dep for $KVER..."
+            depmod -b work/merged "$KVER"
           fi
 
           echo ""
