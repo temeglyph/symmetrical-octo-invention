@@ -51,7 +51,7 @@ jobs:
       - name: Install Build Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y repo git curl bc bison flex libssl-dev libelf-dev cpio lz4 unzip
+          sudo apt-get install -y repo git curl bc bison flex libssl-dev libelf-dev cpio lz4 unzip fakeroot
 
       - name: Initialize & Sync AOSP Kernel
         run: |
@@ -139,7 +139,6 @@ jobs:
       # ============================================================
       - name: Merge Kernel Modules into Stock Ramdisk
         run: |
-          set -e
 
           echo "============================================"
           echo "  Merging custom kernel modules into stock  "
@@ -160,21 +159,21 @@ jobs:
 
           if [[ "$MAGIC_HEX" == 04224d18* ]] || [[ "$MAGIC_HEX" == 02214c18* ]]; then
             echo "    Format: LZ4"
-            lz4 -dc "$INITRAMFS" | cpio -idm --quiet
+            lz4 -dc "$INITRAMFS" | fakeroot cpio -idm --quiet 2>&1 | grep -v "Cannot mknod" || true
           elif [[ "$MAGIC_HEX" == 1f8b* ]]; then
             echo "    Format: gzip"
-            gzip -dc "$INITRAMFS" | cpio -idm --quiet
+            gzip -dc "$INITRAMFS" | fakeroot cpio -idm --quiet 2>&1 | grep -v "Cannot mknod" || true
           elif [[ "$MAGIC_HEX" == 28b52ffd* ]]; then
             echo "    Format: zstd"
-            zstd -dc "$INITRAMFS" | cpio -idm --quiet
+            zstd -dc "$INITRAMFS" | fakeroot cpio -idm --quiet 2>&1 | grep -v "Cannot mknod" || true
           elif [[ "$MAGIC_HEX" == 30373037* ]]; then
             echo "    Format: raw cpio"
-            cpio -idm --quiet < "$INITRAMFS"
+            fakeroot cpio -idm --quiet < "$INITRAMFS" 2>&1 | grep -v "Cannot mknod" || true
           else
             echo "    Format: unknown ($MAGIC_HEX), trying all decompressors..."
-            lz4 -dc "$INITRAMFS" 2>/dev/null | cpio -idm --quiet 2>/dev/null || \
-            gzip -dc "$INITRAMFS" 2>/dev/null | cpio -idm --quiet 2>/dev/null || \
-            cpio -idm --quiet < "$INITRAMFS" 2>/dev/null || true
+            lz4 -dc "$INITRAMFS" 2>/dev/null | fakeroot cpio -idm --quiet 2>/dev/null || \
+            gzip -dc "$INITRAMFS" 2>/dev/null | fakeroot cpio -idm --quiet 2>/dev/null || \
+            fakeroot cpio -idm --quiet < "$INITRAMFS" 2>/dev/null || true
           fi
 
           echo "    Kernel modules found:"
@@ -202,15 +201,15 @@ jobs:
 
           REPACK_FORMAT="lz4"
           if [[ "$STOCK_MAGIC" == 04224d18* ]] || [[ "$STOCK_MAGIC" == 02214c18* ]]; then
-            lz4 -dc "$STOCK" | cpio -idm --quiet
+            lz4 -dc "$STOCK" | fakeroot cpio -idm --quiet 2>&1 | grep -v "Cannot mknod" || true
             REPACK_FORMAT="lz4"
           elif [[ "$STOCK_MAGIC" == 1f8b* ]]; then
-            gzip -dc "$STOCK" | cpio -idm --quiet
+            gzip -dc "$STOCK" | fakeroot cpio -idm --quiet 2>&1 | grep -v "Cannot mknod" || true
             REPACK_FORMAT="gzip"
           else
-            lz4 -dc "$STOCK" 2>/dev/null | cpio -idm --quiet 2>/dev/null || \
-            gzip -dc "$STOCK" 2>/dev/null | cpio -idm --quiet 2>/dev/null || \
-            cpio -idm --quiet < "$STOCK" 2>/dev/null || true
+            lz4 -dc "$STOCK" 2>/dev/null | fakeroot cpio -idm --quiet 2>/dev/null || \
+            gzip -dc "$STOCK" 2>/dev/null | fakeroot cpio -idm --quiet 2>/dev/null || \
+            fakeroot cpio -idm --quiet < "$STOCK" 2>/dev/null || true
           fi
 
           echo "    Stock ramdisk contents:"
@@ -290,9 +289,9 @@ jobs:
           echo ">>> Step 4: Repacking (format: $REPACK_FORMAT)..."
           cd work/merged
           if [ "$REPACK_FORMAT" = "gzip" ]; then
-            find . | cpio -o -H newc --quiet | gzip -9 > ../../merged_ramdisk.img
+            fakeroot sh -c 'find . | cpio -o -H newc --quiet' | gzip -9 > ../../merged_ramdisk.img
           else
-            find . | cpio -o -H newc --quiet | lz4 -l -12 --favor-decSpeed > ../../merged_ramdisk.img
+            fakeroot sh -c 'find . | cpio -o -H newc --quiet' | lz4 -l -12 --favor-decSpeed > ../../merged_ramdisk.img
           fi
           cd ../..
 
