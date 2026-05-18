@@ -25,32 +25,40 @@ jobs:
           repo init -u https://android.googlesource.com/kernel/manifest -b common-android14-6.1 --depth=1
           repo sync -j$(nproc) --no-clone-bundle --no-tags
           
-      - name: Inject Official KernelSU
+      - name: Inject Official KernelSU & Fix X86
         run: |
           cd kernel_workspace/common
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+          # This fixes the 'Indirect Safe' error that causes bootloops on older Intel CPUs
           sed -i 's/#ifndef X86_FEATURE_INDIRECT_SAFE/#if 0/g' drivers/kernelsu/core/init.c
           sed -i 's/if (!boot_cpu_has(X86_FEATURE_INDIRECT_SAFE))/if (0)/g' drivers/kernelsu/core/init.c
           
-      - name: Force Built-in Virtio Drivers
+      - name: Force Built-in Drivers (The "No-Fail" Logic)
         run: |
           cd kernel_workspace
-          # Specifically force the disk and PCI drivers to be built into the bzImage core
-          # This allows the kernel to mount the system without needing any external .ko modules
+          # 1. Merge Virtual Device configs into the core GKI config
+          cat common-modules/virtual-device/virtual_device_core.fragment >> common/arch/x86/configs/gki_defconfig
+          cat common-modules/virtual-device/virtual_device.fragment >> common/arch/x86/configs/gki_defconfig
+          
+          # 2. Force all drivers from 'Module' (=m) to 'Built-in' (=y)
+          # This ensures the kernel doesn't need a ramdisk to find the hard drive
+          sed -i 's/=m/=y/g' common/arch/x86/configs/gki_defconfig
+          
+          # 3. Explicitly ensure Virtio is enabled (Critical for Emulator)
           echo "CONFIG_VIRTIO_PCI=y" >> common/arch/x86/configs/gki_defconfig
           echo "CONFIG_VIRTIO_BLK=y" >> common/arch/x86/configs/gki_defconfig
-          echo "CONFIG_VIRTIO_NET=y" >> common/arch/x86/configs/gki_defconfig
           
       - name: Compile Kernel Core
         run: |
           cd kernel_workspace
-          # We build the kernel target directly to avoid the 'Missing Module' distribution error
+          # We build ONLY the kernel binary. This avoids the 'Missing Module' error 
+          # that happened in your last log because we aren't running the distribution script.
           tools/bazel build //common:kernel_x86_64
           
       - name: Prepare Artifact
         run: |
           cd kernel_workspace
-          # Find the compiled bzImage and move it to the root for easy uploading
+          # Logic: Locate the raw bzImage inside the Bazel sandbox and pull it out
           find bazel-bin/common/kernel_x86_64 -name bzImage -exec cp {} . \;
           
       - name: Upload Finished Artifact
