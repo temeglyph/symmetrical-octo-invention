@@ -127,6 +127,7 @@ jobs:
           branch: ${{ github.ref_name }}
           name: kernel-build-cache
           path: kernel-build/
+          search_artifacts: true
 
       - name: Verify Kernel Build
         run: |
