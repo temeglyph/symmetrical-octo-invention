@@ -1,38 +1,44 @@
-name: Build KernelSU LKM x86_64
+name: Build Full AVD x86_64 KernelSU (Android 14)
 
 on:
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
-  build-lkm:
+  build-kernel:
     runs-on: ubuntu-latest
-    
-    # Switched to the explicit x86_64 GKI compiler engine container image
-    container:
-      image: ghcr.io/ylarod/ddk-min:android14-6.1-x86_64
-      options: --privileged
-
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - name: Maximize Build Space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
 
-      - name: Fetch KernelSU Source
+      - name: Install Build Tools
         run: |
-          git clone https://github.com/tiann/KernelSU.git
+          sudo apt-get update
+          sudo apt-get install -y repo git curl bc bison flex libssl-dev libelf-dev
           
-      - name: Compile Module
+      - name: Initialize & Sync AOSP Kernel
         run: |
-          cd KernelSU/kernel
-          # Setting explicit flags for the x86_64 emulator cross-compiler
-          export ARCH=x86_64
-          export CROSS_COMPILE=x86_64-linux-android-
-          CONFIG_KSU=m CC=clang make
+          mkdir kernel_workspace && cd kernel_workspace
+          git config --global user.name "Builder"
+          git config --global user.email "build@example.com"
+          # Pulling the exact Android 14 (6.1) kernel source tree
+          repo init -u https://android.googlesource.com/kernel/manifest -b common-android14-6.1 --depth=1
+          repo sync -j$(nproc) --no-clone-bundle --no-tags
           
-      - name: Upload Finished Module File
+      - name: Inject Official KernelSU
+        run: |
+          cd kernel_workspace/common
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+          
+      - name: Compile Native x86_64 Kernel
+        run: |
+          cd kernel_workspace
+          # Official Bazel command to build the x86_64 GKI image
+          tools/bazel run //common:kernel_x86_64_dist -- --dist_dir=out/dist
+          
+      - name: Upload Finished bzImage
         uses: actions/upload-artifact@v4
         with:
-          name: kernelsu-x86_64-artifact
-          path: KernelSU/kernel/kernelsu.ko
+          name: kernelsu-avd-x86_64-kernel
+          path: kernel_workspace/out/dist/bzImage
