@@ -2,28 +2,29 @@ name: Build Full AVD x86_64 KernelSU (Android 14)
 
 on:
   workflow_dispatch:
+    inputs:
+      skip_kernel_build:
+        description: 'Skip kernel build (reuse cached artifacts from previous run)'
+        required: false
+        default: 'false'
+        type: boolean
 
 jobs:
   build-kernel:
     runs-on: ubuntu-latest
+    # Skip this job entirely if we're reusing a previous build
+    if: ${{ github.event.inputs.skip_kernel_build != 'true' }}
     steps:
-      # ============================================================
-      # STEP 0: Grab the stock ramdisk BEFORE cleanup deletes the SDK
-      # ============================================================
       - name: Save Stock Ramdisk Before Cleanup
         run: |
           echo "=== Searching for stock ramdisk.img in pre-installed Android SDK ==="
           FOUND=""
-
-          # GitHub runners have Android SDK at ANDROID_HOME or /usr/local/lib/android/sdk
           for base in "$ANDROID_HOME" "$ANDROID_SDK_ROOT" "/usr/local/lib/android/sdk"; do
             if [ -d "$base/system-images" ]; then
               echo "Searching in: $base/system-images/"
               find "$base/system-images" -name "ramdisk.img" -type f 2>/dev/null | while read f; do
                 echo "  Found: $f ($(wc -c < "$f") bytes)"
               done
-
-              # Prefer API 34 x86_64, but accept any x86_64 ramdisk
               for candidate in \
                 "$base/system-images/android-34/google_apis/x86_64/ramdisk.img" \
                 "$base/system-images/android-34/default/x86_64/ramdisk.img" \
@@ -35,7 +36,6 @@ jobs:
               done
             fi
           done
-
           if [ -n "$FOUND" ]; then
             cp "$FOUND" /tmp/stock_ramdisk.img
             echo "✅ Saved stock ramdisk from SDK: $FOUND ($(wc -c < /tmp/stock_ramdisk.img) bytes)"
@@ -73,70 +73,125 @@ jobs:
           cd kernel_workspace
           tools/bazel run //common-modules/virtual-device:virtual_device_x86_64_dist -- --dist_dir=out/dist
 
-      # ============================================================
-      # STEP: Get stock ramdisk (from pre-save or download)
-      # ============================================================
+      # Upload the raw kernel build as a SEPARATE artifact so it can be reused
+      - name: Upload Kernel Build Cache
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-build-cache
+          path: |
+            kernel_workspace/out/dist/bzImage
+            kernel_workspace/out/dist/initramfs.img
+          retention-days: 30
+
+      # Also upload stock ramdisk if we saved one
+      - name: Upload Stock Ramdisk Cache
+        run: |
+          mkdir -p stock_cache
+          if [ -f /tmp/stock_ramdisk.img ]; then
+            cp /tmp/stock_ramdisk.img stock_cache/
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stock-ramdisk-cache
+          path: stock_cache/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ================================================================
+  # JOB 2: Merge ramdisk (runs FAST — uses cached kernel build)
+  # ================================================================
+  merge-ramdisk:
+    runs-on: ubuntu-latest
+    needs: build-kernel
+    # Always run this job, even if build-kernel was skipped
+    if: ${{ always() }}
+    steps:
+      - name: Install Tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cpio lz4 unzip fakeroot
+
+      # Download kernel build artifacts (from this run or previous run)
+      - name: Download Kernel Build
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-build-cache
+          path: kernel-build/
+
+      - name: Verify Kernel Build
+        run: |
+          echo "=== Kernel Build Artifacts ==="
+          ls -la kernel-build/
+          if [ ! -f kernel-build/bzImage ] || [ ! -f kernel-build/initramfs.img ]; then
+            echo "❌ Missing kernel build artifacts!"
+            echo "Run the workflow again with 'Skip kernel build' = false"
+            exit 1
+          fi
+          echo "✅ bzImage: $(wc -c < kernel-build/bzImage) bytes"
+          echo "✅ initramfs.img: $(wc -c < kernel-build/initramfs.img) bytes"
+
+      # Try to get stock ramdisk from cache, then SDK, then download
       - name: Obtain Stock Ramdisk
         run: |
           set -e
 
-          # Check if we saved it before cleanup
-          if [ -f /tmp/stock_ramdisk.img ]; then
-            cp /tmp/stock_ramdisk.img stock_ramdisk.img
-            echo "✅ Using pre-saved stock ramdisk: $(wc -c < stock_ramdisk.img) bytes"
+          # Try cached stock ramdisk first
+          if [ -f stock-ramdisk-cache/stock_ramdisk.img ]; then
+            cp stock-ramdisk-cache/stock_ramdisk.img stock_ramdisk.img
+            echo "✅ Using cached stock ramdisk: $(wc -c < stock_ramdisk.img) bytes"
             exit 0
           fi
 
-          echo "No pre-saved ramdisk. Downloading from Google..."
-          mkdir -p stock_work && cd stock_work
+          # Try pre-installed SDK
+          for base in "$ANDROID_HOME" "$ANDROID_SDK_ROOT" "/usr/local/lib/android/sdk"; do
+            for candidate in \
+              "$base/system-images/android-34/google_apis/x86_64/ramdisk.img" \
+              "$base/system-images/android-34/default/x86_64/ramdisk.img"; do
+              if [ -f "$candidate" ]; then
+                cp "$candidate" stock_ramdisk.img
+                echo "✅ Using SDK stock ramdisk: $(wc -c < stock_ramdisk.img) bytes"
+                exit 0
+              fi
+            done
+          done
 
-          # Try downloading the system image zip
-          DOWNLOADED=false
+          # Download from Google
+          echo "Downloading stock ramdisk from Google..."
+          mkdir -p stock_work && cd stock_work
           for url in \
             "https://dl.google.com/android/repository/sys-img/google_apis/x86_64-34_r13.zip" \
             "https://dl.google.com/android/repository/sys-img/google_apis/x86_64-34_r12.zip" \
             "https://dl.google.com/android/repository/sys-img/google_apis/x86_64-34_r11.zip"; do
             echo "Trying: $url"
             if curl -fSL -o sysimg.zip "$url" 2>/dev/null; then
-              echo "Download successful! Size: $(wc -c < sysimg.zip) bytes"
-              DOWNLOADED=true
+              echo "Download successful!"
               break
             fi
           done
-
-          if [ "$DOWNLOADED" = false ]; then
-            echo "❌ All download URLs failed!"
-            exit 1
+          if [ -f sysimg.zip ]; then
+            unzip -o sysimg.zip -d extracted/
+            STOCK_RAMDISK=$(find extracted/ -name "ramdisk.img" -type f | head -1)
+            if [ -n "$STOCK_RAMDISK" ]; then
+              cp "$STOCK_RAMDISK" ../stock_ramdisk.img
+              echo "✅ Stock ramdisk extracted: $(wc -c < ../stock_ramdisk.img) bytes"
+            fi
           fi
-
-          # Extract WITHOUT path filters — just unzip everything, then find the file
-          echo "Extracting zip (full contents)..."
-          unzip -o sysimg.zip -d extracted/
-          echo ""
-          echo "All files in extracted zip:"
-          find extracted/ -type f -name "*.img" | sort
-          echo ""
-
-          # Find ramdisk.img
-          STOCK_RAMDISK=$(find extracted/ -name "ramdisk.img" -type f | head -1)
-
-          if [ -n "$STOCK_RAMDISK" ] && [ -f "$STOCK_RAMDISK" ]; then
-            cp "$STOCK_RAMDISK" ../stock_ramdisk.img
-            echo "✅ Stock ramdisk extracted: $STOCK_RAMDISK ($(wc -c < ../stock_ramdisk.img) bytes)"
-          else
-            echo "❌ ramdisk.img not found in zip!"
-            echo "Zip contents:"
-            find extracted/ -type f | sort
-            exit 1
-          fi
-
           cd ..
-          # Clean up the large zip to free disk space
           rm -rf stock_work
 
-      # ============================================================
-      # STEP: Merge kernel modules into stock ramdisk
-      # ============================================================
+          if [ ! -f stock_ramdisk.img ]; then
+            echo "❌ Could not obtain stock ramdisk!"
+            exit 1
+          fi
+
+      # Try to download cached stock ramdisk from build job
+      - name: Try Download Stock Ramdisk Cache
+        uses: actions/download-artifact@v4
+        with:
+          name: stock-ramdisk-cache
+          path: stock-ramdisk-cache/
+        continue-on-error: true
+
       - name: Merge Kernel Modules into Stock Ramdisk
         run: |
 
@@ -146,14 +201,12 @@ jobs:
           echo "============================================"
           echo ""
 
-          # --- Step 1: Extract the built initramfs (contains .ko modules) ---
+          # --- Step 1: Extract the built initramfs ---
           echo ">>> Step 1: Extracting built initramfs.img..."
           mkdir -p work/built
           cd work/built
 
-          INITRAMFS="../../kernel_workspace/out/dist/initramfs.img"
-
-          # Detect compression and extract
+          INITRAMFS="../../kernel-build/initramfs.img"
           MAGIC_HEX=$(xxd -l 4 -p "$INITRAMFS")
           echo "    initramfs magic bytes: $MAGIC_HEX"
 
@@ -163,33 +216,20 @@ jobs:
           elif [[ "$MAGIC_HEX" == 1f8b* ]]; then
             echo "    Format: gzip"
             gzip -dc "$INITRAMFS" | fakeroot cpio -idm --quiet 2>&1 | grep -v "Cannot mknod" || true
-          elif [[ "$MAGIC_HEX" == 28b52ffd* ]]; then
-            echo "    Format: zstd"
-            zstd -dc "$INITRAMFS" | fakeroot cpio -idm --quiet 2>&1 | grep -v "Cannot mknod" || true
-          elif [[ "$MAGIC_HEX" == 30373037* ]]; then
-            echo "    Format: raw cpio"
-            fakeroot cpio -idm --quiet < "$INITRAMFS" 2>&1 | grep -v "Cannot mknod" || true
           else
-            echo "    Format: unknown ($MAGIC_HEX), trying all decompressors..."
-            lz4 -dc "$INITRAMFS" 2>/dev/null | fakeroot cpio -idm --quiet 2>/dev/null || \
-            gzip -dc "$INITRAMFS" 2>/dev/null | fakeroot cpio -idm --quiet 2>/dev/null || \
-            fakeroot cpio -idm --quiet < "$INITRAMFS" 2>/dev/null || true
+            echo "    Format: unknown, trying lz4..."
+            lz4 -dc "$INITRAMFS" 2>/dev/null | fakeroot cpio -idm --quiet 2>/dev/null || true
           fi
 
-          echo "    Kernel modules found:"
-          find . -name "*.ko" | sort | sed 's/^/      /'
           KO_COUNT=$(find . -name "*.ko" | wc -l)
           echo "    Total .ko files: $KO_COUNT"
-
           if [ "$KO_COUNT" -eq 0 ]; then
             echo "    ❌ No kernel modules in initramfs!"
-            echo "    Full contents:"
-            find . -type f | sort | sed 's/^/      /'
             exit 1
           fi
           cd ../..
 
-          # --- Step 2: Extract the stock ramdisk (contains Android init) ---
+          # --- Step 2: Extract the stock ramdisk ---
           echo ""
           echo ">>> Step 2: Extracting stock ramdisk.img..."
           mkdir -p work/stock
@@ -207,91 +247,61 @@ jobs:
             gzip -dc "$STOCK" | fakeroot cpio -idm --quiet 2>&1 | grep -v "Cannot mknod" || true
             REPACK_FORMAT="gzip"
           else
-            lz4 -dc "$STOCK" 2>/dev/null | fakeroot cpio -idm --quiet 2>/dev/null || \
-            gzip -dc "$STOCK" 2>/dev/null | fakeroot cpio -idm --quiet 2>/dev/null || \
-            fakeroot cpio -idm --quiet < "$STOCK" 2>/dev/null || true
+            lz4 -dc "$STOCK" 2>/dev/null | fakeroot cpio -idm --quiet 2>/dev/null || true
           fi
 
-          echo "    Stock ramdisk contents:"
-          ls -la | sed 's/^/      /'
           echo "    /init present: $([ -f init ] && echo 'YES ✅' || echo 'NO ❌')"
-          echo "    /lib/modules exists: $([ -d lib/modules ] && echo 'YES' || echo 'NO (will create)')"
           cd ../..
 
           # --- Step 3: Merge ---
           echo ""
           echo ">>> Step 3: Merging modules into stock ramdisk..."
           mkdir -p work/merged
-
-          # Copy stock ramdisk as base (preserves Android's init)
           cp -a work/stock/. work/merged/
 
-          # Copy the ENTIRE /lib/modules tree from built initramfs, preserving structure
-          # first_stage_init expects: /lib/modules/<kernel_version>/*.ko + modules.load
           if [ -d work/built/lib/modules ]; then
             echo "    Copying entire /lib/modules tree (preserving kernel version directory)..."
             mkdir -p work/merged/lib/modules
             cp -a work/built/lib/modules/. work/merged/lib/modules/
-            echo "    Module tree structure:"
-            find work/merged/lib/modules -type f | head -20 | sed 's/^/      /'
-            echo "      ... ($(find work/merged/lib/modules -name '*.ko' | wc -l) total .ko files)"
+            echo "    .ko files: $(find work/merged/lib/modules -name '*.ko' | wc -l)"
           else
             echo "    ⚠️ No /lib/modules in built initramfs, copying flat..."
             mkdir -p work/merged/lib/modules
             find work/built -name "*.ko" -exec cp {} work/merged/lib/modules/ \;
           fi
 
-          # Find the kernel version directory
           KVER_DIR=$(find work/merged/lib/modules -mindepth 1 -maxdepth 1 -type d | head -1)
           echo "    Kernel version dir: $KVER_DIR"
 
-          # If modules.load doesn't exist in the kernel version dir, generate one
           if [ -n "$KVER_DIR" ] && [ ! -f "$KVER_DIR/modules.load" ]; then
-            echo "    Generating modules.load in $KVER_DIR..."
+            echo "    Generating modules.load..."
             {
-              # VirtIO core must load first
               for m in virtio.ko virtio_ring.ko; do
                 find "$KVER_DIR" -name "$m" -printf "%P\n" 2>/dev/null
               done
-              # PCI transport before device drivers
               for m in virtio_pci_modern_dev.ko virtio_pci_legacy_dev.ko virtio_pci.ko; do
                 find "$KVER_DIR" -name "$m" -printf "%P\n" 2>/dev/null
               done
-              # Critical device drivers
               for m in virtio_blk.ko virtio_net.ko virtio_console.ko virtio_input.ko virtio_balloon.ko virtio_mmio.ko; do
                 find "$KVER_DIR" -name "$m" -printf "%P\n" 2>/dev/null
               done
-              # Everything else
               find "$KVER_DIR" -name "*.ko" -printf "%P\n" | \
                 grep -v -E "(virtio\.ko|virtio_ring\.ko|virtio_pci_modern_dev\.ko|virtio_pci_legacy_dev\.ko|virtio_pci\.ko|virtio_blk\.ko|virtio_net\.ko|virtio_console\.ko|virtio_input\.ko|virtio_balloon\.ko|virtio_mmio\.ko)$" | \
                 sort
             } > "$KVER_DIR/modules.load"
           fi
 
-          # Show modules.load content
           echo ""
-          echo "    modules.load location and content:"
+          echo "    modules.load:"
           MODULES_LOAD=$(find work/merged/lib/modules -name "modules.load" | head -1)
-          if [ -n "$MODULES_LOAD" ]; then
-            echo "    File: $MODULES_LOAD"
-            cat "$MODULES_LOAD" | sed 's/^/      /'
-          else
-            echo "    ⚠️ modules.load NOT FOUND!"
-          fi
+          [ -n "$MODULES_LOAD" ] && cat "$MODULES_LOAD" | head -15 | sed 's/^/      /' || echo "    ⚠️ NOT FOUND"
 
-          # --- Verify ---
           echo ""
           echo ">>> Verification:"
           for critical in virtio_blk.ko virtio_pci.ko; do
-            if find work/merged/lib/modules -name "$critical" | grep -q .; then
-              echo "    ✅ $critical found"
-            else
-              echo "    ❌ $critical MISSING"
-            fi
+            find work/merged/lib/modules -name "$critical" | grep -q . && echo "    ✅ $critical" || echo "    ❌ $critical MISSING"
           done
-          [ -f work/merged/init ] && echo "    ✅ /init (Android first_stage_init)" || echo "    ❌ /init MISSING"
-          echo "    Module tree:"
-          find work/merged/lib/modules -type d | sed 's/^/      /'
+          [ -f work/merged/init ] && echo "    ✅ /init" || echo "    ❌ /init MISSING"
 
           # --- Step 4: Repack ---
           echo ""
@@ -307,22 +317,18 @@ jobs:
           echo ""
           echo "============================================"
           printf "  %-25s %s bytes\n" "Stock ramdisk:" "$(wc -c < stock_ramdisk.img)"
-          printf "  %-25s %s bytes\n" "Built initramfs:" "$(wc -c < kernel_workspace/out/dist/initramfs.img)"
+          printf "  %-25s %s bytes\n" "Built initramfs:" "$(wc -c < kernel-build/initramfs.img)"
           printf "  %-25s %s bytes\n" "Merged ramdisk:" "$(wc -c < merged_ramdisk.img)"
-          printf "  %-25s %s bytes\n" "Kernel (bzImage):" "$(wc -c < kernel_workspace/out/dist/bzImage)"
+          printf "  %-25s %s bytes\n" "Kernel (bzImage):" "$(wc -c < kernel-build/bzImage)"
           echo "============================================"
 
       - name: Prepare Final Artifacts
         run: |
           mkdir -p final_output
-
-          # Ready-to-deploy files (drop these into your SDK system-images folder)
-          cp kernel_workspace/out/dist/bzImage final_output/kernel-ranchu
+          cp kernel-build/bzImage final_output/kernel-ranchu
           cp merged_ramdisk.img final_output/ramdisk.img
-
-          # Raw build artifacts (for debugging)
-          cp kernel_workspace/out/dist/bzImage final_output/bzImage
-          cp kernel_workspace/out/dist/initramfs.img final_output/initramfs.img
+          cp kernel-build/bzImage final_output/bzImage
+          cp kernel-build/initramfs.img final_output/initramfs.img
 
       - name: Upload Finished Artifacts
         uses: actions/upload-artifact@v4
