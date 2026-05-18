@@ -1,4 +1,4 @@
-name: Build Full AVD x86_64 KernelSU (Android 14)
+name: Build Full AVD x86_64 KernelSU & Ramdisk
 
 on:
   workflow_dispatch:
@@ -15,8 +15,8 @@ jobs:
       - name: Install Build Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y repo git curl bc bison flex libssl-dev libelf-dev
-          
+          sudo apt-get install -y repo git curl bc bison flex libssl-dev libelf-dev lz4 cpio
+
       - name: Initialize & Sync AOSP Kernel
         run: |
           mkdir kernel_workspace && cd kernel_workspace
@@ -24,24 +24,39 @@ jobs:
           git config --global user.email "build@example.com"
           repo init -u https://android.googlesource.com/kernel/manifest -b common-android14-6.1 --depth=1
           repo sync -j$(nproc) --no-clone-bundle --no-tags
-          
+
       - name: Inject Official KernelSU
         run: |
           cd kernel_workspace/common
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
           sed -i 's/#ifndef X86_FEATURE_INDIRECT_SAFE/#if 0/g' drivers/kernelsu/core/init.c
           sed -i 's/if (!boot_cpu_has(X86_FEATURE_INDIRECT_SAFE))/if (0)/g' drivers/kernelsu/core/init.c
-          
+
       - name: Compile Native x86_64 Emulator Kernel
         run: |
           cd kernel_workspace
-          # CRITICAL FIX: Build the virtual_device target so virtio_blk is included
           tools/bazel run //common-modules/virtual-device:virtual_device_x86_64_dist -- --dist_dir=out/dist
+
+      - name: Patch Official Ramdisk with New Drivers
+        run: |
+          # 1. Download the official Google API 34 image directly from Google
+          echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "system-images;android-34;google_apis;x86_64"
           
+          mkdir ramdisk_workspace && cd ramdisk_workspace
+          
+          # 2. Unpack the official Android 14 OS ramdisk
+          lz4 -c -d -l $ANDROID_HOME/system-images/android-34/google_apis/x86_64/ramdisk.img | sudo cpio -i
+          
+          # 3. Inject your newly compiled KernelSU drivers into the OS
+          sudo cp ../kernel_workspace/out/dist/*.ko lib/modules/
+          
+          # 4. Repack the ramdisk perfectly natively
+          sudo find . | sudo cpio -o -H newc -R root:root | lz4 -l -12 --favor-decSpeed > ../patched_ramdisk.img
+
       - name: Upload Finished Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: kernelsu-avd-x86_64-files
+          name: kernelsu-avd-patched-files
           path: |
             kernel_workspace/out/dist/bzImage
-            kernel_workspace/out/dist/initramfs.img
+            patched_ramdisk.img
