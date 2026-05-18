@@ -112,9 +112,18 @@ jobs:
           sudo apt-get install -y -qq cpio lz4 unzip fakeroot
 
       # Download kernel build artifacts (from this run or previous run)
-      - name: Download Kernel Build
+      - name: Download Kernel Build (Current Run)
+        if: ${{ github.event.inputs.skip_kernel_build != 'true' }}
         uses: actions/download-artifact@v4
         with:
+          name: kernel-build-cache
+          path: kernel-build/
+
+      - name: Download Kernel Build (Previous Run)
+        if: ${{ github.event.inputs.skip_kernel_build == 'true' }}
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          workflow: ${{ github.workflow }}
           name: kernel-build-cache
           path: kernel-build/
 
