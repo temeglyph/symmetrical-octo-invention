@@ -300,8 +300,8 @@ jobs:
           KVER_DIR=$(find work/merged/lib/modules -mindepth 1 -maxdepth 1 -type d | head -1)
           echo "    Kernel version dir: $KVER_DIR"
 
-          if [ -n "$KVER_DIR" ] && [ ! -f "$KVER_DIR/modules.load" ]; then
-            echo "    Generating modules.load..."
+          if [ -n "$KVER_DIR" ]; then
+            echo "    Forcing regeneration of modules.load..."
             {
               for m in virtio.ko virtio_ring.ko; do
                 find "$KVER_DIR" -name "$m" -printf "%P\n" 2>/dev/null
@@ -309,12 +309,12 @@ jobs:
               for m in virtio_pci_modern_dev.ko virtio_pci_legacy_dev.ko virtio_pci.ko; do
                 find "$KVER_DIR" -name "$m" -printf "%P\n" 2>/dev/null
               done
-              for m in virtio_blk.ko virtio_net.ko virtio_console.ko virtio_input.ko virtio_balloon.ko virtio_mmio.ko; do
+              for m in virtio_blk.ko virtio_net.ko virtio_console.ko virtio_input.ko virtio_balloon.ko virtio_mmio.ko virtio-gpu.ko virtio-rng.ko; do
                 find "$KVER_DIR" -name "$m" -printf "%P\n" 2>/dev/null
               done
-              find "$KVER_DIR" -name "*.ko" -printf "%P\n" | \
-                grep -v -E "(virtio\.ko|virtio_ring\.ko|virtio_pci_modern_dev\.ko|virtio_pci_legacy_dev\.ko|virtio_pci\.ko|virtio_blk\.ko|virtio_net\.ko|virtio_console\.ko|virtio_input\.ko|virtio_balloon\.ko|virtio_mmio\.ko)$" | \
-                sort
+              for m in goldfish_pipe.ko goldfish_address_space.ko goldfish_sync.ko goldfish_battery.ko; do
+                find "$KVER_DIR" -name "$m" -printf "%P\n" 2>/dev/null
+              done
             } > "$KVER_DIR/modules.load"
           fi
 
