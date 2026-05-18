@@ -302,23 +302,23 @@ jobs:
           echo "    Kernel version dir: $KVER_DIR"
 
           if [ -n "$KVER_DIR" ]; then
-            echo "    Forcing regeneration of modules.load..."
+            KVER=$(basename "$KVER_DIR")
+            echo "    Forcing regeneration of modules.load with ABSOLUTE paths..."
             {
               for m in virtio.ko virtio_ring.ko; do
-                find "$KVER_DIR" -name "$m" -printf "%P\n" 2>/dev/null
+                find "$KVER_DIR" -name "$m" -printf "/lib/modules/$KVER/%P\n" 2>/dev/null
               done
               for m in virtio_pci_modern_dev.ko virtio_pci_legacy_dev.ko virtio_pci.ko; do
-                find "$KVER_DIR" -name "$m" -printf "%P\n" 2>/dev/null
+                find "$KVER_DIR" -name "$m" -printf "/lib/modules/$KVER/%P\n" 2>/dev/null
               done
               for m in virtio_blk.ko virtio_net.ko virtio_console.ko virtio_input.ko virtio_balloon.ko virtio_mmio.ko virtio-gpu.ko virtio-rng.ko; do
-                find "$KVER_DIR" -name "$m" -printf "%P\n" 2>/dev/null
+                find "$KVER_DIR" -name "$m" -printf "/lib/modules/$KVER/%P\n" 2>/dev/null
               done
               for m in goldfish_pipe.ko goldfish_address_space.ko goldfish_sync.ko goldfish_battery.ko; do
-                find "$KVER_DIR" -name "$m" -printf "%P\n" 2>/dev/null
+                find "$KVER_DIR" -name "$m" -printf "/lib/modules/$KVER/%P\n" 2>/dev/null
               done
             } > "$KVER_DIR/modules.load"
             
-            KVER=$(basename "$KVER_DIR")
             echo "    Running depmod to generate modules.dep for $KVER..."
             depmod -b work/merged "$KVER"
           fi
