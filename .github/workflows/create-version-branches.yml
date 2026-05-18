@@ -1,7 +1,7 @@
-name: Build KernelSU LKM
+name: Build KernelSU LKM x86_64
 
 on:
-  workflow_dispatch: # Allows you to manually trigger the build with a button
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -10,9 +10,9 @@ jobs:
   build-lkm:
     runs-on: ubuntu-latest
     
-    # Loads Ylarod's compiler engine pinned precisely to your emulator's KMI
+    # Switched to the explicit x86_64 GKI compiler engine container image
     container:
-      image: ghcr.io/ylarod/ddk-min:android14-6.1
+      image: ghcr.io/ylarod/ddk-min:android14-6.1-x86_64
       options: --privileged
 
     steps:
@@ -26,11 +26,13 @@ jobs:
       - name: Compile Module
         run: |
           cd KernelSU/kernel
-          # Added flags to force compilation of the driver module using Clang
-          CONFIG_KSU=m CC=clang ARCH=x86_64 make
+          # Setting explicit flags for the x86_64 emulator cross-compiler
+          export ARCH=x86_64
+          export CROSS_COMPILE=x86_64-linux-android-
+          CONFIG_KSU=m CC=clang make
           
       - name: Upload Finished Module File
         uses: actions/upload-artifact@v4
         with:
-          name: kernelsu-lkm-artifact
+          name: kernelsu-x86_64-artifact
           path: KernelSU/kernel/kernelsu.ko
