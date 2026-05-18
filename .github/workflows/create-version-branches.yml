@@ -230,6 +230,7 @@ jobs:
           # first_stage_init expects: /lib/modules/<kernel_version>/*.ko + modules.load
           if [ -d work/built/lib/modules ]; then
             echo "    Copying entire /lib/modules tree (preserving kernel version directory)..."
+            mkdir -p work/merged/lib/modules
             cp -a work/built/lib/modules/. work/merged/lib/modules/
             echo "    Module tree structure:"
             find work/merged/lib/modules -type f | head -20 | sed 's/^/      /'
