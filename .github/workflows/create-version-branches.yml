@@ -302,25 +302,23 @@ jobs:
           echo "    Kernel version dir: $KVER_DIR"
 
           if [ -n "$KVER_DIR" ]; then
-            KVER=$(basename "$KVER_DIR")
-            echo "    Forcing regeneration of modules.load with ABSOLUTE paths..."
+            echo "    Forcing sequential modules.load and mock modules.dep..."
+            
+            # Generate modules.load in exact sequential order
             {
-              for m in virtio.ko virtio_ring.ko; do
-                find "$KVER_DIR" -name "$m" -printf "/lib/modules/$KVER/%P\n" 2>/dev/null
-              done
-              for m in virtio_pci_modern_dev.ko virtio_pci_legacy_dev.ko virtio_pci.ko; do
-                find "$KVER_DIR" -name "$m" -printf "/lib/modules/$KVER/%P\n" 2>/dev/null
-              done
-              for m in virtio_blk.ko virtio_net.ko virtio_console.ko virtio_input.ko virtio_balloon.ko virtio_mmio.ko virtio-gpu.ko virtio-rng.ko; do
-                find "$KVER_DIR" -name "$m" -printf "/lib/modules/$KVER/%P\n" 2>/dev/null
-              done
-              for m in goldfish_pipe.ko goldfish_address_space.ko goldfish_sync.ko goldfish_battery.ko; do
-                find "$KVER_DIR" -name "$m" -printf "/lib/modules/$KVER/%P\n" 2>/dev/null
-              done
+              for m in virtio.ko virtio_ring.ko; do find "$KVER_DIR" -name "$m" -printf "%P\n" 2>/dev/null; done
+              for m in virtio_pci_modern_dev.ko virtio_pci_legacy_dev.ko virtio_pci.ko; do find "$KVER_DIR" -name "$m" -printf "%P\n" 2>/dev/null; done
+              for m in virtio_blk.ko virtio_net.ko virtio_console.ko virtio_input.ko virtio_balloon.ko virtio_mmio.ko virtio-gpu.ko virtio-rng.ko; do find "$KVER_DIR" -name "$m" -printf "%P\n" 2>/dev/null; done
+              for m in goldfish_pipe.ko goldfish_address_space.ko goldfish_sync.ko goldfish_battery.ko mac80211_hwsim.ko; do find "$KVER_DIR" -name "$m" -printf "%P\n" 2>/dev/null; done
             } > "$KVER_DIR/modules.load"
             
-            echo "    Running depmod to generate modules.dep for $KVER..."
-            depmod -b work/merged "$KVER"
+            # Pick the first valid built-in module as a dummy dependency
+            DUMMY=$(grep -v '^#' "$KVER_DIR/modules.builtin" | head -n 1)
+            echo "    Dummy dependency used: $DUMMY"
+            
+            # Generate a mock modules.dep where EVERY module depends on the built-in dummy
+            # This completely bypasses the libmodprobe parsing bugs.
+            find "$KVER_DIR" -name "*.ko" -printf "%P: $DUMMY\n" > "$KVER_DIR/modules.dep"
           fi
 
           echo ""
