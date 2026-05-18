@@ -123,7 +123,8 @@ jobs:
         if: ${{ github.event.inputs.skip_kernel_build == 'true' }}
         uses: dawidd6/action-download-artifact@v3
         with:
-          workflow: ${{ github.workflow }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ github.ref_name }}
           name: kernel-build-cache
           path: kernel-build/
 
