@@ -22,7 +22,6 @@ jobs:
           mkdir kernel_workspace && cd kernel_workspace
           git config --global user.name "Builder"
           git config --global user.email "build@example.com"
-          # Pulling the exact Android 14 (6.1) kernel source tree
           repo init -u https://android.googlesource.com/kernel/manifest -b common-android14-6.1 --depth=1
           repo sync -j$(nproc) --no-clone-bundle --no-tags
           
@@ -30,19 +29,19 @@ jobs:
         run: |
           cd kernel_workspace/common
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
-          # Forcefully lobotomize the strict x86_64 hardware security checks
           sed -i 's/#ifndef X86_FEATURE_INDIRECT_SAFE/#if 0/g' drivers/kernelsu/core/init.c
           sed -i 's/if (!boot_cpu_has(X86_FEATURE_INDIRECT_SAFE))/if (0)/g' drivers/kernelsu/core/init.c
           
-          
-      - name: Compile Native x86_64 Kernel
+      - name: Compile Native x86_64 Emulator Kernel
         run: |
           cd kernel_workspace
-          # Official Bazel command to build the x86_64 GKI image
-          tools/bazel run //common:kernel_x86_64_dist -- --dist_dir=out/dist
+          # CRITICAL FIX: Build the virtual_device target so virtio_blk is included
+          tools/bazel run //common-modules/virtual-device:virtual_device_x86_64_dist -- --dist_dir=out/dist
           
-      - name: Upload Finished bzImage
+      - name: Upload Finished Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: kernelsu-avd-x86_64-kernel
-          path: kernel_workspace/out/dist/bzImage
+          name: kernelsu-avd-x86_64-files
+          path: |
+            kernel_workspace/out/dist/bzImage
+            kernel_workspace/out/dist/initramfs.img
