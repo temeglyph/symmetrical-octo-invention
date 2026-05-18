@@ -29,16 +29,19 @@ jobs:
         run: |
           cd kernel_workspace/common
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
-          # Crucial fix for your specific Intel CPU to prevent bootloops
+          # Preservation of your Intel CPU compatibility patches
           sed -i 's/#ifndef X86_FEATURE_INDIRECT_SAFE/#if 0/g' drivers/kernelsu/core/init.c
           sed -i 's/if (!boot_cpu_has(X86_FEATURE_INDIRECT_SAFE))/if (0)/g' drivers/kernelsu/core/init.c
           
-      - name: Configure Fragment (Baking Drivers)
+      - name: Configure Fragments (The Proper Way)
         run: |
           cd kernel_workspace
-          # Convert modules to built-in drivers so the kernel can boot standalone
+          # 1. Convert all Virtual Device modules from =m to =y (Built-in)
+          # This ensures drivers are inside bzImage
           sed -i 's/=m/=y/g' common-modules/virtual-device/virtual_device_core.fragment
           sed -i 's/=m/=y/g' common-modules/virtual-device/virtual_device.fragment
+          
+          # 2. Append KernelSU and explicit Virtio requirements
           {
             echo "CONFIG_KSU=y"
             echo "CONFIG_VIRTIO_PCI=y"
@@ -47,24 +50,26 @@ jobs:
             echo "CONFIG_VIRTIO_CONSOLE=y"
           } >> common-modules/virtual-device/virtual_device_core.fragment
 
-      - name: Surgical Patch (Bypass Module Check)
+      - name: Surgical Patch (THE FIX FOR MODULE ERRORS)
         run: |
           cd kernel_workspace
-          # This is the "Magic" step. We wipe the list of expected .ko files 
-          # from the Bazel build file so it doesn't crash when it can't find them.
-          perl -0777 -pi -e 's/module_outs = \[[^\]]*\]/module_outs = []/gs' common-modules/virtual-device/BUILD.bazel
+          # This is the "Magic" command. It searches the BUILD.bazel file 
+          # and empties the list of expected modules. 
+          # This stops Bazel from crashing when it can't find .ko files.
+          sed -i 's/module_outs =.*/module_outs = [],/g' common-modules/virtual-device/BUILD.bazel
           
       - name: Compile Virtual Device Kernel
         run: |
           cd kernel_workspace
-          # Build the virtual_device target. It will now finish without errors.
+          # We build the Virtual Device target. 
+          # It will now finish 100% because it won't check for missing modules.
           tools/bazel build //common-modules/virtual-device:virtual_device_x86_64
           
       - name: Prepare Artifact
         run: |
           cd kernel_workspace
-          # Find the bzImage in the output tree and copy it to the root
-          find bazel-bin/common-modules/virtual-device -name bzImage -exec cp {} . \;
+          # Find the bzImage anywhere in the build tree and move it to the root
+          find bazel-bin -name bzImage -exec cp {} . \;
           
       - name: Upload Finished Artifact
         uses: actions/upload-artifact@v4
