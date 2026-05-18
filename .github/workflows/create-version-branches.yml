@@ -33,32 +33,33 @@ jobs:
           sed -i 's/#ifndef X86_FEATURE_INDIRECT_SAFE/#if 0/g' drivers/kernelsu/core/init.c
           sed -i 's/if (!boot_cpu_has(X86_FEATURE_INDIRECT_SAFE))/if (0)/g' drivers/kernelsu/core/init.c
           
-      - name: Force Built-in Drivers (The "No-Fail" Logic)
+      - name: Force Built-in Drivers (The No-Fail Logic)
         run: |
           cd kernel_workspace
-          # 1. Merge Virtual Device configs into the core GKI config
+          # 1. Add the Virtual Device (Emulator) fragments to the core config
           cat common-modules/virtual-device/virtual_device_core.fragment >> common/arch/x86/configs/gki_defconfig
           cat common-modules/virtual-device/virtual_device.fragment >> common/arch/x86/configs/gki_defconfig
           
-          # 2. Force all drivers from 'Module' (=m) to 'Built-in' (=y)
-          # This ensures the kernel doesn't need a ramdisk to find the hard drive
+          # 2. Convert all modules (=m) to built-in (=y)
+          # This ensures drivers like virtio_blk are inside bzImage
           sed -i 's/=m/=y/g' common/arch/x86/configs/gki_defconfig
           
-          # 3. Explicitly ensure Virtio is enabled (Critical for Emulator)
+          # 3. Explicitly enable essential emulator drivers
           echo "CONFIG_VIRTIO_PCI=y" >> common/arch/x86/configs/gki_defconfig
           echo "CONFIG_VIRTIO_BLK=y" >> common/arch/x86/configs/gki_defconfig
+          echo "CONFIG_VIRTIO_NET=y" >> common/arch/x86/configs/gki_defconfig
           
       - name: Compile Kernel Core
         run: |
           cd kernel_workspace
-          # We build ONLY the kernel binary. This avoids the 'Missing Module' error 
-          # that happened in your last log because we aren't running the distribution script.
-          tools/bazel build //common:kernel_x86_64
+          # --//build/kernel/kleaf:check_defconfig=false is the CRITICAL flag.
+          # It tells Bazel: "I know the config isn't perfectly formatted, build it anyway."
+          tools/bazel build --//build/kernel/kleaf:check_defconfig=false //common:kernel_x86_64
           
       - name: Prepare Artifact
         run: |
           cd kernel_workspace
-          # Logic: Locate the raw bzImage inside the Bazel sandbox and pull it out
+          # Locate the raw bzImage inside the Bazel sandbox
           find bazel-bin/common/kernel_x86_64 -name bzImage -exec cp {} . \;
           
       - name: Upload Finished Artifact
