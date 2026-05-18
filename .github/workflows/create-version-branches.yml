@@ -226,63 +226,71 @@ jobs:
           # Copy stock ramdisk as base (preserves Android's init)
           cp -a work/stock/. work/merged/
 
-          # Create modules directory
-          mkdir -p work/merged/lib/modules
+          # Copy the ENTIRE /lib/modules tree from built initramfs, preserving structure
+          # first_stage_init expects: /lib/modules/<kernel_version>/*.ko + modules.load
+          if [ -d work/built/lib/modules ]; then
+            echo "    Copying entire /lib/modules tree (preserving kernel version directory)..."
+            cp -a work/built/lib/modules/. work/merged/lib/modules/
+            echo "    Module tree structure:"
+            find work/merged/lib/modules -type f | head -20 | sed 's/^/      /'
+            echo "      ... ($(find work/merged/lib/modules -name '*.ko' | wc -l) total .ko files)"
+          else
+            echo "    ⚠️ No /lib/modules in built initramfs, copying flat..."
+            mkdir -p work/merged/lib/modules
+            find work/built -name "*.ko" -exec cp {} work/merged/lib/modules/ \;
+          fi
 
-          # Copy all .ko files from built initramfs
-          echo "    Copying kernel modules:"
-          find work/built -name "*.ko" | while read ko; do
-            BASENAME=$(basename "$ko")
-            cp "$ko" "work/merged/lib/modules/$BASENAME"
-            echo "      + $BASENAME"
-          done
+          # Find the kernel version directory
+          KVER_DIR=$(find work/merged/lib/modules -mindepth 1 -maxdepth 1 -type d | head -1)
+          echo "    Kernel version dir: $KVER_DIR"
 
-          # Copy module metadata files
-          echo "    Copying module metadata:"
-          find work/built -maxdepth 5 \( -name "modules.dep" -o -name "modules.softdep" -o -name "modules.alias" -o -name "modules.options" -o -name "modules.load" \) | while read meta; do
-            BASENAME=$(basename "$meta")
-            cp "$meta" "work/merged/lib/modules/$BASENAME"
-            echo "      + $BASENAME"
-          done
-
-          # Generate modules.load if not copied (with correct VirtIO load order)
-          if [ ! -f work/merged/lib/modules/modules.load ]; then
-            echo "    Generating modules.load..."
+          # If modules.load doesn't exist in the kernel version dir, generate one
+          if [ -n "$KVER_DIR" ] && [ ! -f "$KVER_DIR/modules.load" ]; then
+            echo "    Generating modules.load in $KVER_DIR..."
             {
               # VirtIO core must load first
               for m in virtio.ko virtio_ring.ko; do
-                [ -f "work/merged/lib/modules/$m" ] && echo "$m"
+                find "$KVER_DIR" -name "$m" -printf "%P\n" 2>/dev/null
               done
               # PCI transport before device drivers
               for m in virtio_pci_modern_dev.ko virtio_pci_legacy_dev.ko virtio_pci.ko; do
-                [ -f "work/merged/lib/modules/$m" ] && echo "$m"
+                find "$KVER_DIR" -name "$m" -printf "%P\n" 2>/dev/null
               done
               # Critical device drivers
               for m in virtio_blk.ko virtio_net.ko virtio_console.ko virtio_input.ko virtio_balloon.ko virtio_mmio.ko; do
-                [ -f "work/merged/lib/modules/$m" ] && echo "$m"
+                find "$KVER_DIR" -name "$m" -printf "%P\n" 2>/dev/null
               done
               # Everything else
-              find work/merged/lib/modules -name "*.ko" -printf "%f\n" | \
-                grep -v -E "^(virtio\.ko|virtio_ring\.ko|virtio_pci_modern_dev\.ko|virtio_pci_legacy_dev\.ko|virtio_pci\.ko|virtio_blk\.ko|virtio_net\.ko|virtio_console\.ko|virtio_input\.ko|virtio_balloon\.ko|virtio_mmio\.ko)$" | \
+              find "$KVER_DIR" -name "*.ko" -printf "%P\n" | \
+                grep -v -E "(virtio\.ko|virtio_ring\.ko|virtio_pci_modern_dev\.ko|virtio_pci_legacy_dev\.ko|virtio_pci\.ko|virtio_blk\.ko|virtio_net\.ko|virtio_console\.ko|virtio_input\.ko|virtio_balloon\.ko|virtio_mmio\.ko)$" | \
                 sort
-            } > work/merged/lib/modules/modules.load
+            } > "$KVER_DIR/modules.load"
           fi
 
+          # Show modules.load content
           echo ""
-          echo "    modules.load:"
-          cat work/merged/lib/modules/modules.load | sed 's/^/      /'
+          echo "    modules.load location and content:"
+          MODULES_LOAD=$(find work/merged/lib/modules -name "modules.load" | head -1)
+          if [ -n "$MODULES_LOAD" ]; then
+            echo "    File: $MODULES_LOAD"
+            cat "$MODULES_LOAD" | sed 's/^/      /'
+          else
+            echo "    ⚠️ modules.load NOT FOUND!"
+          fi
 
           # --- Verify ---
           echo ""
           echo ">>> Verification:"
           for critical in virtio_blk.ko virtio_pci.ko; do
-            if [ -f "work/merged/lib/modules/$critical" ]; then
-              echo "    ✅ $critical"
+            if find work/merged/lib/modules -name "$critical" | grep -q .; then
+              echo "    ✅ $critical found"
             else
               echo "    ❌ $critical MISSING"
             fi
           done
           [ -f work/merged/init ] && echo "    ✅ /init (Android first_stage_init)" || echo "    ❌ /init MISSING"
+          echo "    Module tree:"
+          find work/merged/lib/modules -type d | sed 's/^/      /'
 
           # --- Step 4: Repack ---
           echo ""
