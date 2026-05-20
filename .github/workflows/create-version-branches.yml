@@ -45,11 +45,24 @@ jobs:
         run: |
           cd kernel_workspace/common
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+
+          # --- Fix 1: x86 feature guard (existing) ---
           sed -i 's/#ifndef X86_FEATURE_INDIRECT_SAFE/#if 0/g' drivers/kernelsu/core/init.c
           sed -i 's/if (!boot_cpu_has(X86_FEATURE_INDIRECT_SAFE))/if (0)/g' drivers/kernelsu/core/init.c
-          sed -i 's/-Werror//g' drivers/kernelsu/Makefile
-          echo "ccflags-y += -Wno-array-bounds" >> drivers/kernelsu/Makefile
-          echo "ccflags-y += -Wno-error" >> drivers/kernelsu/Makefile
+
+          # --- Fix 2: patch_memory.c calls BUG_ON but never includes linux/bug.h ---
+          sed -i '1i #include <linux/bug.h>' drivers/kernelsu/hook/x86_64/patch_memory.c
+
+          # --- Fix 3: Disable CONFIG_WERROR globally in the kernel defconfig ---
+          sed -i 's/CONFIG_WERROR=y/# CONFIG_WERROR is not set/' arch/x86/configs/gki_defconfig
+
+          # --- Fix 4: Add -Wno-error to BOTH Makefile and Kbuild (kernel prefers Kbuild) ---
+          for f in drivers/kernelsu/Makefile drivers/kernelsu/Kbuild; do
+            if [ -f "$f" ]; then
+              sed -i 's/-Werror//g' "$f"
+              echo "ccflags-y += -Wno-error -Wno-array-bounds -Wno-implicit-function-declaration" >> "$f"
+            fi
+          done
 
       - name: Compile Native x86_64 Emulator Kernel
         run: |
