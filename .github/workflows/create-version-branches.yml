@@ -25,13 +25,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y repo git curl bc bison flex libssl-dev libelf-dev cpio lz4 unzip fakeroot
 
-      - name: Initialize & Sync AOSP Kernel
+      - name: Initialize & Sync AOSP Kernel (Pinned to build 9964412)
         run: |
           mkdir kernel_workspace && cd kernel_workspace
           git config --global user.name "Builder"
           git config --global user.email "build@example.com"
           repo init -u https://android.googlesource.com/kernel/manifest -b common-android14-6.1 --depth=1
-          repo sync -j$(nproc) --no-clone-bundle --no-tags
+          
+          echo ">>> Downloading pinned manifest for build 9964412..."
+          curl -LSs "https://ci.android.com/builds/submitted/9964412/kernel_virt_x86_64/latest/raw/manifest_9964412.xml" -o .repo/manifests/avd-14.xml
+          
+          echo ">>> Re-initializing repo with pinned manifest..."
+          repo init -m avd-14.xml
+          
+          echo ">>> Syncing exact kernel source..."
+          repo sync -c -j$(nproc) --no-clone-bundle --no-tags
 
       - name: Inject Official KernelSU
         run: |
