@@ -305,6 +305,7 @@ jobs:
           done
 
           echo "    Generating modules.load with correct load order..."
+          echo "    Generating modules.load with correct load order..."
           {
             for m in virtio.ko virtio_ring.ko virtio_pci_modern_dev.ko \
                      virtio_pci_legacy_dev.ko virtio_pci.ko \
@@ -313,9 +314,7 @@ jobs:
                      virtio-gpu.ko virtio-rng.ko \
                      goldfish_pipe.ko goldfish_address_space.ko \
                      goldfish_sync.ko goldfish_battery.ko mac80211_hwsim.ko; do
-              if [ -f "work/overlay/lib/modules/$KVER/$m" ]; then
-                echo "$m"
-              fi
+              find "work/overlay/lib/modules/$KVER" -name "$m" -printf "%P\n" 2>/dev/null
             done
           } > "work/overlay/lib/modules/$KVER/modules.load"
 
@@ -354,15 +353,18 @@ jobs:
             gzip -9 < merged_all.cpio > merged_ramdisk.img
           fi
 
-          # Quick sanity: verify our overlay files exist in the merged CPIO
+          # Quick sanity: verify our overlay files exist in the overlay CPIO
           echo ""
-          echo ">>> Verification: checking merged ramdisk contents..."
+          echo ">>> Verification: checking overlay ramdisk contents..."
           mkdir -p work/verify
           cd work/verify
-          cpio -i --quiet "lib/modules/$KVER/modules.dep" "lib/modules/$KVER/modules.alias" "lib/modules/$KVER/modules.load" "lib/modules/$KVER/virtio_pci_modern_dev.ko" < ../../merged_all.cpio 2>/dev/null || true
-          for f in "lib/modules/$KVER/modules.dep" "lib/modules/$KVER/modules.alias" "lib/modules/$KVER/modules.load" "lib/modules/$KVER/virtio_pci_modern_dev.ko"; do
+          cpio -i --quiet "lib/modules/$KVER/modules.dep" "lib/modules/$KVER/modules.alias" "lib/modules/$KVER/modules.load" < ../../overlay.cpio 2>/dev/null || true
+          for f in "lib/modules/$KVER/modules.dep" "lib/modules/$KVER/modules.alias" "lib/modules/$KVER/modules.load"; do
             [ -f "$f" ] && echo "    ✅ /$f FOUND" || echo "    ❌ /$f MISSING"
           done
+          
+          VIRTIO_FOUND=$(cpio -t < ../../overlay.cpio 2>/dev/null | grep "virtio_pci_modern_dev.ko" || true)
+          [ -n "$VIRTIO_FOUND" ] && echo "    ✅ /$VIRTIO_FOUND FOUND" || echo "    ❌ virtio_pci_modern_dev.ko MISSING"
           cd ../..
 
           echo ""
