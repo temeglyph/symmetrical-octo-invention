@@ -356,16 +356,14 @@ jobs:
           # Quick sanity: verify our overlay files exist in the overlay CPIO
           echo ""
           echo ">>> Verification: checking overlay ramdisk contents..."
-          mkdir -p work/verify
-          cd work/verify
-          cpio -i --quiet "./lib/modules/$KVER/modules.dep" "./lib/modules/$KVER/modules.alias" "./lib/modules/$KVER/modules.load" < ../../overlay.cpio 2>/dev/null || true
-          for f in "lib/modules/$KVER/modules.dep" "lib/modules/$KVER/modules.alias" "lib/modules/$KVER/modules.load"; do
-            [ -f "./$f" ] && echo "    ✅ /$f FOUND" || echo "    ❌ /$f MISSING"
+          ARCHIVE_CONTENTS=$(cpio -t < overlay.cpio 2>/dev/null || true)
+          for f in "modules.dep" "modules.alias" "modules.load" "virtio_pci_modern_dev.ko"; do
+            if echo "$ARCHIVE_CONTENTS" | grep -q "$f"; then
+              echo "    ✅ $f FOUND"
+            else
+              echo "    ❌ $f MISSING"
+            fi
           done
-          
-          VIRTIO_FOUND=$(cpio -t < ../../overlay.cpio 2>/dev/null | grep "virtio_pci_modern_dev.ko" || true)
-          [ -n "$VIRTIO_FOUND" ] && echo "    ✅ $VIRTIO_FOUND FOUND" || echo "    ❌ virtio_pci_modern_dev.ko MISSING"
-          cd ../..
 
           echo ""
           echo "============================================"
