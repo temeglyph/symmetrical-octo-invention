@@ -360,7 +360,7 @@ jobs:
           cd work/verify
           cpio -i --quiet "./lib/modules/$KVER/modules.dep" "./lib/modules/$KVER/modules.alias" "./lib/modules/$KVER/modules.load" < ../../overlay.cpio 2>/dev/null || true
           for f in "lib/modules/$KVER/modules.dep" "lib/modules/$KVER/modules.alias" "lib/modules/$KVER/modules.load"; do
-            [ -f ".$f" ] && echo "    ✅ /$f FOUND" || echo "    ❌ /$f MISSING"
+            [ -f "./$f" ] && echo "    ✅ /$f FOUND" || echo "    ❌ /$f MISSING"
           done
           
           VIRTIO_FOUND=$(cpio -t < ../../overlay.cpio 2>/dev/null | grep "virtio_pci_modern_dev.ko" || true)
