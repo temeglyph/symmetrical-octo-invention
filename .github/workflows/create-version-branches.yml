@@ -244,7 +244,6 @@ jobs:
           # --- Step 2: Determine Stock Ramdisk Format ---
           echo ""
           echo ">>> Step 2: Determining stock ramdisk format..."
-          STOCK="../../stock_ramdisk.img"
           STOCK_MAGIC=$(xxd -l 4 -p stock_ramdisk.img)
           echo "    Magic bytes: $STOCK_MAGIC"
 
@@ -260,21 +259,50 @@ jobs:
             REPACK_FORMAT="lz4"
           fi
 
-          # --- Step 3: Create Overlay ---
+          # --- Step 3: Create Overlay with correct kernel version ---
           echo ""
           echo ">>> Step 3: Creating kernel module overlay..."
-          mkdir -p work/overlay/lib/modules/0.0
-          
-          echo "    Flattening compiled .ko files into overlay..."
-          find work/built -name "*.ko" -exec cp {} work/overlay/lib/modules/0.0/ \;
-          echo "    .ko files: $(find work/overlay/lib/modules/0.0 -name '*.ko' | wc -l)"
 
-          echo "    Running depmod to generate metadata..."
-          depmod -a -b work/overlay 0.0
+          # Determine actual kernel version from built modules
+          KVER_DIR=$(find work/built/lib/modules -mindepth 1 -maxdepth 1 -type d | head -1)
+          if [ -n "$KVER_DIR" ]; then
+            KVER=$(basename "$KVER_DIR")
+            echo "    Kernel version (from initramfs dir): $KVER"
+          else
+            # Fallback: read vermagic from a .ko file
+            FIRST_KO=$(find work/built -name "*.ko" | head -1)
+            if [ -n "$FIRST_KO" ]; then
+              KVER=$(modinfo -F vermagic "$FIRST_KO" | awk '{print $1}')
+              echo "    Kernel version (from modinfo): $KVER"
+            else
+              echo "    ❌ Cannot determine kernel version!"
+              exit 1
+            fi
+          fi
 
-          echo "    Moving files to root of /lib/modules/ for init fallback..."
-          mv work/overlay/lib/modules/0.0/* work/overlay/lib/modules/
-          rmdir work/overlay/lib/modules/0.0
+          mkdir -p "work/overlay/lib/modules/$KVER"
+
+          # Copy .ko files into versioned directory
+          if [ -d "$KVER_DIR" ]; then
+            echo "    Copying modules from initramfs version dir..."
+            cp -a "$KVER_DIR"/. "work/overlay/lib/modules/$KVER/"
+          else
+            echo "    Flattening compiled .ko files into overlay..."
+            find work/built -name "*.ko" -exec cp {} "work/overlay/lib/modules/$KVER/" \;
+          fi
+          echo "    .ko files: $(find "work/overlay/lib/modules/$KVER" -name '*.ko' | wc -l)"
+
+          echo "    Running depmod for kernel $KVER..."
+          depmod -a -b work/overlay "$KVER"
+
+          # Verify depmod output
+          for f in modules.dep modules.alias modules.symbols; do
+            if [ -f "work/overlay/lib/modules/$KVER/$f" ]; then
+              echo "    ✅ $f ($(wc -l < "work/overlay/lib/modules/$KVER/$f") lines)"
+            else
+              echo "    ⚠️ $f not generated"
+            fi
+          done
 
           echo "    Generating modules.load with correct load order..."
           {
@@ -285,28 +313,57 @@ jobs:
                      virtio-gpu.ko virtio-rng.ko \
                      goldfish_pipe.ko goldfish_address_space.ko \
                      goldfish_sync.ko goldfish_battery.ko mac80211_hwsim.ko; do
-              if [ -f "work/overlay/lib/modules/$m" ]; then
+              if [ -f "work/overlay/lib/modules/$KVER/$m" ]; then
                 echo "$m"
               fi
             done
-          } > work/overlay/lib/modules/modules.load
+          } > "work/overlay/lib/modules/$KVER/modules.load"
 
           echo "    Overlay modules.load:"
-          cat work/overlay/lib/modules/modules.load | head -15 | sed 's/^/      /'
+          cat "work/overlay/lib/modules/$KVER/modules.load" | head -15 | sed 's/^/      /'
 
-          # --- Step 4: Repack Overlay and Append ---
+          # --- Step 4: Decompress stock, concat raw CPIOs, recompress ---
           echo ""
-          echo ">>> Step 4: Repacking overlay and appending to stock ramdisk..."
-          cd work/overlay
-          if [ "$REPACK_FORMAT" = "lz4" ]; then
-            fakeroot sh -c 'find . | cpio -o -H newc --quiet' | lz4 -l -12 --favor-decSpeed > ../overlay.img
-          else
-            fakeroot sh -c 'find . | cpio -o -H newc --quiet' | gzip -9 > ../overlay.img
-          fi
-          cd ../..
+          echo ">>> Step 4: Merging ramdisks (decompress → concat CPIOs → recompress)..."
 
-          echo "    Appending overlay to stock ramdisk..."
-          cat stock_ramdisk.img work/overlay.img > merged_ramdisk.img
+          # Decompress stock ramdisk to raw CPIO (preserves ALL concatenated archives)
+          echo "    Decompressing stock ramdisk to raw CPIO..."
+          if [ "$REPACK_FORMAT" = "lz4" ]; then
+            lz4 -dc stock_ramdisk.img > stock_all.cpio
+          else
+            gzip -dc stock_ramdisk.img > stock_all.cpio
+          fi
+          echo "    Stock raw CPIO: $(wc -c < stock_all.cpio) bytes"
+
+          # Create overlay CPIO (uncompressed)
+          echo "    Creating overlay CPIO archive..."
+          cd work/overlay
+          fakeroot sh -c 'find . | cpio -o -H newc --quiet' > ../../overlay.cpio
+          cd ../..
+          echo "    Overlay CPIO: $(wc -c < overlay.cpio) bytes"
+
+          # Concatenate raw CPIOs, then recompress as SINGLE stream
+          echo "    Concatenating stock + overlay CPIOs..."
+          cat stock_all.cpio overlay.cpio > merged_all.cpio
+          echo "    Merged CPIO: $(wc -c < merged_all.cpio) bytes"
+
+          echo "    Compressing merged CPIO as single $REPACK_FORMAT stream..."
+          if [ "$REPACK_FORMAT" = "lz4" ]; then
+            lz4 -l -12 --favor-decSpeed merged_all.cpio merged_ramdisk.img
+          else
+            gzip -9 < merged_all.cpio > merged_ramdisk.img
+          fi
+
+          # Quick sanity: verify our overlay files exist in the merged CPIO
+          echo ""
+          echo ">>> Verification: checking merged ramdisk contents..."
+          mkdir -p work/verify
+          cd work/verify
+          cpio -i --quiet "lib/modules/$KVER/modules.dep" "lib/modules/$KVER/modules.alias" "lib/modules/$KVER/modules.load" "lib/modules/$KVER/virtio_pci_modern_dev.ko" < ../../merged_all.cpio 2>/dev/null || true
+          for f in "lib/modules/$KVER/modules.dep" "lib/modules/$KVER/modules.alias" "lib/modules/$KVER/modules.load" "lib/modules/$KVER/virtio_pci_modern_dev.ko"; do
+            [ -f "$f" ] && echo "    ✅ /$f FOUND" || echo "    ❌ /$f MISSING"
+          done
+          cd ../..
 
           echo ""
           echo "============================================"
