@@ -282,14 +282,11 @@ jobs:
 
           mkdir -p "work/overlay/lib/modules/$KVER"
 
-          # Copy .ko files into versioned directory
-          if [ -d "$KVER_DIR" ]; then
-            echo "    Copying modules from initramfs version dir..."
-            cp -a "$KVER_DIR"/. "work/overlay/lib/modules/$KVER/"
-          else
-            echo "    Flattening compiled .ko files into overlay..."
-            find work/built -name "*.ko" -exec cp {} "work/overlay/lib/modules/$KVER/" \;
-          fi
+          # Copy all .ko files into the versioned directory (FLATTENED)
+          # We MUST flatten them because Android's early libmodprobe can fail
+          # to parse subdirectories from modules.dep in some configurations.
+          echo "    Flattening compiled .ko files into overlay..."
+          find work/built -name "*.ko" -exec cp {} "work/overlay/lib/modules/$KVER/" \;
           echo "    .ko files: $(find "work/overlay/lib/modules/$KVER" -name '*.ko' | wc -l)"
 
           echo "    Running depmod for kernel $KVER..."
@@ -305,7 +302,6 @@ jobs:
           done
 
           echo "    Generating modules.load with correct load order..."
-          echo "    Generating modules.load with correct load order..."
           {
             for m in virtio.ko virtio_ring.ko virtio_pci_modern_dev.ko \
                      virtio_pci_legacy_dev.ko virtio_pci.ko \
@@ -314,7 +310,9 @@ jobs:
                      virtio-gpu.ko virtio-rng.ko \
                      goldfish_pipe.ko goldfish_address_space.ko \
                      goldfish_sync.ko goldfish_battery.ko mac80211_hwsim.ko; do
-              find "work/overlay/lib/modules/$KVER" -name "$m" -printf "%P\n" 2>/dev/null
+              if [ -f "work/overlay/lib/modules/$KVER/$m" ]; then
+                echo "$m"
+              fi
             done
           } > "work/overlay/lib/modules/$KVER/modules.load"
 
