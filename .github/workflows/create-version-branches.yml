@@ -68,6 +68,34 @@ jobs:
           sed -i 's/#ifndef X86_FEATURE_INDIRECT_SAFE/#if 0/g' drivers/kernelsu/core/init.c
           sed -i 's/if (!boot_cpu_has(X86_FEATURE_INDIRECT_SAFE))/if (0)/g' drivers/kernelsu/core/init.c
 
+      - name: Force Virtio Drivers to Built-in (=y)
+        run: |
+          cd kernel_workspace
+          echo "Patching virtio drivers from =m to =y..."
+          CONFIGS=(
+            CONFIG_VIRTIO
+            CONFIG_VIRTIO_PCI
+            CONFIG_VIRTIO_PCI_MODERN
+            CONFIG_VIRTIO_PCI_LEGACY
+            CONFIG_VIRTIO_BLK
+            CONFIG_VIRTIO_NET
+            CONFIG_VIRTIO_CONSOLE
+            CONFIG_VIRTIO_BALLOON
+            CONFIG_VIRTIO_INPUT
+            CONFIG_VIRTIO_MMIO
+            CONFIG_DRM_VIRTIO_GPU
+            CONFIG_HW_RANDOM_VIRTIO
+            CONFIG_GOLDFISH_PIPE
+            CONFIG_GOLDFISH_ADDRESS_SPACE
+            CONFIG_GOLDFISH_SYNC
+            CONFIG_GOLDFISH_BATTERY
+            CONFIG_MAC80211_HWSIM
+          )
+          for CFG in "${CONFIGS[@]}"; do
+            find common common-modules -type f \( -name "gki_defconfig" -o -name "*.fragment" \) -exec sed -i "s/${CFG}=m/${CFG}=y/g" {} +
+          done
+          echo "✅ Virtio configurations updated."
+
       - name: Compile Native x86_64 Emulator Kernel
         run: |
           cd kernel_workspace
@@ -448,7 +476,7 @@ jobs:
         run: |
           mkdir -p final_output
           cp kernel-build/bzImage final_output/kernel-ranchu
-          cp merged_ramdisk.img final_output/ramdisk.img
+          cp stock_ramdisk.img final_output/ramdisk.img
           cp kernel-build/bzImage final_output/bzImage
           cp kernel-build/initramfs.img final_output/initramfs.img
 
