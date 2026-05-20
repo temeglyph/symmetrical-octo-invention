@@ -284,53 +284,52 @@ jobs:
           # on TRAILER boundaries and extract every archive.
           mkdir -p merge_root
           echo "    Extracting ALL CPIO archives from stock ramdisk..."
-          python3 << 'EXTRACT_CPIOS'
-import subprocess, os
+          python3 -c 'import sys, textwrap; exec(textwrap.dedent(sys.stdin.read()))' << 'EXTRACT_CPIOS'
+          import subprocess, os
 
-data = open('stock_raw.cpio', 'rb').read()
-magic = b'070701'
-trailer = b'TRAILER!!!'
-dest = 'merge_root'
+          data = open('stock_raw.cpio', 'rb').read()
+          magic = b'070701'
+          trailer = b'TRAILER!!!'
+          dest = 'merge_root'
 
-# Find archive boundaries by locating TRAILER markers
-# then finding the next 070701 magic after each
-archive_starts = []
-if data[:6] == magic:
-    archive_starts.append(0)
+          # Find archive boundaries by locating TRAILER markers
+          # then finding the next 070701 magic after each
+          archive_starts = []
+          if data[:6] == magic:
+              archive_starts.append(0)
 
-pos = 0
-while True:
-    t = data.find(trailer, pos)
-    if t == -1:
-        break
-    # After TRAILER!!!, skip padding (null bytes to 4-byte boundary)
-    end = t + len(trailer)
-    end = (end + 3) & ~3  # align to 4 bytes
-    # Look for next CPIO magic
-    while end < len(data) and data[end:end+1] == b'\x00':
-        end += 1
-    if end < len(data) - 6 and data[end:end+6] == magic:
-        archive_starts.append(end)
-    pos = t + len(trailer)
+          pos = 0
+          while True:
+              t = data.find(trailer, pos)
+              if t == -1:
+                  break
+              # After TRAILER!!!, skip padding (null bytes to 4-byte boundary)
+              end = t + len(trailer)
+              end = (end + 3) & ~3  # align to 4 bytes
+              # Look for next CPIO magic
+              while end < len(data) and data[end:end+1] == b'\x00':
+                  end += 1
+              if end < len(data) - 6 and data[end:end+6] == magic:
+                  archive_starts.append(end)
+              pos = t + len(trailer)
 
-# Add a sentinel for the end
-archive_ends = archive_starts[1:] + [len(data)]
+          # Add a sentinel for the end
+          archive_ends = archive_starts[1:] + [len(data)]
 
-print(f'    Found {len(archive_starts)} CPIO archive(s) in stock ramdisk')
-for i, (start, end) in enumerate(zip(archive_starts, archive_ends)):
-    chunk = data[start:end]
-    proc = subprocess.Popen(
-        ['fakeroot', 'cpio', '-idm', '--quiet', '--no-absolute-filenames'],
-        stdin=subprocess.PIPE, stderr=subprocess.PIPE, cwd=dest
-    )
-    proc.communicate(input=chunk)
-    files = sum(1 for _ in os.scandir(dest)) if i == 0 else '...'
-    print(f'    Archive #{i+1}: {end-start} bytes (offset {start})')
+          print(f'    Found {len(archive_starts)} CPIO archive(s) in stock ramdisk')
+          for i, (start, end) in enumerate(zip(archive_starts, archive_ends)):
+              chunk = data[start:end]
+              proc = subprocess.Popen(
+                  ['fakeroot', 'cpio', '-idm', '--quiet', '--no-absolute-filenames'],
+                  stdin=subprocess.PIPE, stderr=subprocess.PIPE, cwd=dest
+              )
+              proc.communicate(input=chunk)
+              print(f'    Archive #{i+1}: {end-start} bytes (offset {start})')
 
-# Show what we got
-total = sum(1 for root, dirs, files in os.walk(dest) for f in files)
-print(f'    Total files in merge_root: {total}')
-EXTRACT_CPIOS
+          # Show what we got
+          total = sum(1 for root, dirs, files in os.walk(dest) for f in files)
+          print(f'    Total files in merge_root: {total}')
+          EXTRACT_CPIOS
 
           # Verify critical stock files were extracted
           echo "    Stock ramdisk contents:"
