@@ -208,13 +208,13 @@ jobs:
         run: |
 
           echo "============================================"
-          echo "  Merging custom kernel modules into stock  "
-          echo "  Android ramdisk for emulator boot         "
+          echo "  FULL DIRECTORY MERGE approach             "
+          echo "  (No CPIO concatenation — fixes LZ4 bug)  "
           echo "============================================"
           echo ""
 
-          # --- Step 1: Extract the built initramfs ---
-          echo ">>> Step 1: Extracting built initramfs.img..."
+          # --- Step 1: Extract the built initramfs to get .ko files ---
+          echo ">>> Step 1: Extracting .ko modules from built initramfs.img..."
           mkdir -p work/built
           cd work/built
 
@@ -234,42 +234,21 @@ jobs:
           fi
 
           KO_COUNT=$(find . -name "*.ko" | wc -l)
-          echo "    Total .ko files: $KO_COUNT"
+          echo "    Total .ko files extracted: $KO_COUNT"
           if [ "$KO_COUNT" -eq 0 ]; then
             echo "    ❌ No kernel modules in initramfs!"
             exit 1
           fi
           cd ../..
 
-          # --- Step 2: Determine Stock Ramdisk Format ---
+          # --- Step 2: Determine kernel version ---
           echo ""
-          echo ">>> Step 2: Determining stock ramdisk format..."
-          STOCK_MAGIC=$(xxd -l 4 -p stock_ramdisk.img)
-          echo "    Magic bytes: $STOCK_MAGIC"
-
-          REPACK_FORMAT="lz4"
-          if [[ "$STOCK_MAGIC" == 04224d18* ]] || [[ "$STOCK_MAGIC" == 02214c18* ]]; then
-            echo "    Format: LZ4"
-            REPACK_FORMAT="lz4"
-          elif [[ "$STOCK_MAGIC" == 1f8b* ]]; then
-            echo "    Format: GZIP"
-            REPACK_FORMAT="gzip"
-          else
-            echo "    ⚠️ Unknown magic. Defaulting to LZ4."
-            REPACK_FORMAT="lz4"
-          fi
-
-          # --- Step 3: Create Overlay with correct kernel version ---
-          echo ""
-          echo ">>> Step 3: Creating kernel module overlay..."
-
-          # Determine actual kernel version from built modules
+          echo ">>> Step 2: Determining kernel version..."
           KVER_DIR=$(find work/built/lib/modules -mindepth 1 -maxdepth 1 -type d | head -1)
           if [ -n "$KVER_DIR" ]; then
             KVER=$(basename "$KVER_DIR")
-            echo "    Kernel version (from initramfs dir): $KVER"
+            echo "    Kernel version: $KVER"
           else
-            # Fallback: read vermagic from a .ko file
             FIRST_KO=$(find work/built -name "*.ko" | head -1)
             if [ -n "$FIRST_KO" ]; then
               KVER=$(modinfo -F vermagic "$FIRST_KO" | awk '{print $1}')
@@ -280,22 +259,72 @@ jobs:
             fi
           fi
 
-          mkdir -p "work/overlay/lib/modules/$KVER"
+          # --- Step 3: Extract stock ramdisk into merge directory ---
+          echo ""
+          echo ">>> Step 3: Extracting stock ramdisk into merge directory..."
 
-          # Copy all .ko files into the versioned directory (FLATTENED)
-          # We MUST flatten them because Android's early libmodprobe can fail
-          # to parse subdirectories from modules.dep in some configurations.
-          echo "    Flattening compiled .ko files into overlay..."
-          find work/built -name "*.ko" -exec cp {} "work/overlay/lib/modules/$KVER/" \;
-          echo "    .ko files: $(find "work/overlay/lib/modules/$KVER" -name '*.ko' | wc -l)"
+          STOCK_MAGIC=$(xxd -l 4 -p stock_ramdisk.img)
+          echo "    Stock ramdisk magic: $STOCK_MAGIC"
+
+          mkdir -p merge_root
+          cd merge_root
+          if [[ "$STOCK_MAGIC" == 04224d18* ]] || [[ "$STOCK_MAGIC" == 02214c18* ]]; then
+            echo "    Decompressing LZ4 stock ramdisk..."
+            lz4 -dc ../stock_ramdisk.img | fakeroot cpio -idm --quiet 2>/dev/null || true
+          elif [[ "$STOCK_MAGIC" == 1f8b* ]]; then
+            echo "    Decompressing GZIP stock ramdisk..."
+            gzip -dc ../stock_ramdisk.img | fakeroot cpio -idm --quiet 2>/dev/null || true
+          else
+            echo "    ⚠️ Unknown format, trying LZ4..."
+            lz4 -dc ../stock_ramdisk.img 2>/dev/null | fakeroot cpio -idm --quiet 2>/dev/null || true
+          fi
+          cd ..
+
+          # Verify critical stock files were extracted
+          echo "    Stock ramdisk contents:"
+          STOCK_FILE_COUNT=$(find merge_root -type f | wc -l)
+          echo "    Total files extracted: $STOCK_FILE_COUNT"
+          find merge_root -type f | head -20 | sed 's/^/      /'
+
+          if [ -f merge_root/init ]; then
+            echo "    ✅ /init found ($(wc -c < merge_root/init) bytes)"
+          else
+            echo "    ❌ /init NOT FOUND — stock ramdisk extraction failed!"
+            exit 1
+          fi
+
+          # Check for fstab in various locations
+          FSTAB_FOUND=""
+          for fpath in \
+            "merge_root/system/etc/ramdisk/fstab.ranchu" \
+            "merge_root/first_stage_ramdisk/fstab.ranchu" \
+            "merge_root/fstab.ranchu"; do
+            if [ -f "$fpath" ]; then
+              echo "    ✅ fstab.ranchu found at: $fpath"
+              FSTAB_FOUND="$fpath"
+              break
+            fi
+          done
+          if [ -z "$FSTAB_FOUND" ]; then
+            echo "    ⚠️ fstab.ranchu not found in stock ramdisk (may be in kernel or DT)"
+          fi
+
+          # --- Step 4: Copy flattened modules INTO the merge directory ---
+          echo ""
+          echo ">>> Step 4: Adding kernel modules to merge directory..."
+
+          mkdir -p "merge_root/lib/modules/$KVER"
+
+          echo "    Flattening all .ko files into /lib/modules/$KVER/..."
+          find work/built -name "*.ko" -exec cp {} "merge_root/lib/modules/$KVER/" \;
+          echo "    .ko files copied: $(find "merge_root/lib/modules/$KVER" -name '*.ko' | wc -l)"
 
           echo "    Running depmod for kernel $KVER..."
-          depmod -a -b work/overlay "$KVER"
+          depmod -a -b merge_root "$KVER"
 
-          # Verify depmod output
           for f in modules.dep modules.alias modules.symbols; do
-            if [ -f "work/overlay/lib/modules/$KVER/$f" ]; then
-              echo "    ✅ $f ($(wc -l < "work/overlay/lib/modules/$KVER/$f") lines)"
+            if [ -f "merge_root/lib/modules/$KVER/$f" ]; then
+              echo "    ✅ $f ($(wc -l < "merge_root/lib/modules/$KVER/$f") lines)"
             else
               echo "    ⚠️ $f not generated"
             fi
@@ -310,64 +339,57 @@ jobs:
                      virtio-gpu.ko virtio-rng.ko \
                      goldfish_pipe.ko goldfish_address_space.ko \
                      goldfish_sync.ko goldfish_battery.ko mac80211_hwsim.ko; do
-              if [ -f "work/overlay/lib/modules/$KVER/$m" ]; then
+              if [ -f "merge_root/lib/modules/$KVER/$m" ]; then
                 echo "$m"
               fi
             done
-          } > "work/overlay/lib/modules/$KVER/modules.load"
+          } > "merge_root/lib/modules/$KVER/modules.load"
 
-          echo "    Overlay modules.load:"
-          cat "work/overlay/lib/modules/$KVER/modules.load" | head -15 | sed 's/^/      /'
+          echo "    modules.load entries:"
+          cat "merge_root/lib/modules/$KVER/modules.load" | sed 's/^/      /'
 
-          # --- Step 4: Decompress stock, concat raw CPIOs, recompress ---
+          # --- Step 5: Create ONE single CPIO archive and compress ---
           echo ""
-          echo ">>> Step 4: Merging ramdisks (decompress → concat CPIOs → recompress)..."
+          echo ">>> Step 5: Creating SINGLE CPIO archive from merged directory..."
+          echo "    (No CPIO concatenation — this avoids the LZ4 TRAILER bug)"
 
-          # Decompress stock ramdisk to raw CPIO (preserves ALL concatenated archives)
-          echo "    Decompressing stock ramdisk to raw CPIO..."
-          if [ "$REPACK_FORMAT" = "lz4" ]; then
-            lz4 -dc stock_ramdisk.img > stock_all.cpio
-          else
-            gzip -dc stock_ramdisk.img > stock_all.cpio
-          fi
-          echo "    Stock raw CPIO: $(wc -c < stock_all.cpio) bytes"
+          cd merge_root
+          find . | sort | fakeroot cpio -o -H newc --quiet > ../merged.cpio
+          cd ..
+          echo "    Single CPIO archive: $(wc -c < merged.cpio) bytes"
 
-          # Create overlay CPIO (uncompressed)
-          echo "    Creating overlay CPIO archive..."
-          cd work/overlay
-          fakeroot sh -c 'find . | cpio -o -H newc --quiet' > ../../overlay.cpio
-          cd ../..
-          echo "    Overlay CPIO: $(wc -c < overlay.cpio) bytes"
-
-          # Concatenate raw CPIOs, then recompress as SINGLE stream
-          echo "    Concatenating stock + overlay CPIOs..."
-          cat stock_all.cpio overlay.cpio > merged_all.cpio
-          echo "    Merged CPIO: $(wc -c < merged_all.cpio) bytes"
-
-          echo "    Compressing merged CPIO as single $REPACK_FORMAT stream..."
-          if [ "$REPACK_FORMAT" = "lz4" ]; then
-            lz4 -l -12 --favor-decSpeed merged_all.cpio merged_ramdisk.img
-          else
-            gzip -9 < merged_all.cpio > merged_ramdisk.img
-          fi
-
-          # Quick sanity: verify our overlay files exist in the overlay CPIO
+          echo "    Compressing as LZ4 legacy stream..."
+          lz4 -l -12 --favor-decSpeed merged.cpio merged_ramdisk.img
           echo ""
-          echo ">>> Verification: checking overlay ramdisk contents..."
-          ARCHIVE_CONTENTS=$(cpio -t < overlay.cpio 2>/dev/null || true)
-          for f in "modules.dep" "modules.alias" "modules.load" "virtio_pci_modern_dev.ko"; do
-            if echo "$ARCHIVE_CONTENTS" | grep -q "$f"; then
+
+          # --- Verification ---
+          echo ">>> Verification: checking final ramdisk contents..."
+          FINAL_CONTENTS=$(cpio -t < merged.cpio 2>/dev/null || true)
+          ALL_GOOD=true
+          for f in "init" "fstab.ranchu" "modules.dep" "modules.alias" "modules.load" \
+                   "virtio_pci_modern_dev.ko" "virtio_blk.ko" "virtio_pci.ko"; do
+            if echo "$FINAL_CONTENTS" | grep -q "$f"; then
               echo "    ✅ $f FOUND"
             else
               echo "    ❌ $f MISSING"
+              ALL_GOOD=false
             fi
           done
+
+          if [ "$ALL_GOOD" = false ]; then
+            echo ""
+            echo "    ⚠️ Some files are missing! Dumping full archive listing..."
+            echo "$FINAL_CONTENTS" | wc -l
+            echo "    (Full listing too long, showing first 50 entries:)"
+            echo "$FINAL_CONTENTS" | head -50 | sed 's/^/      /'
+          fi
 
           echo ""
           echo "============================================"
           printf "  %-25s %s bytes\n" "Stock ramdisk:" "$(wc -c < stock_ramdisk.img)"
           printf "  %-25s %s bytes\n" "Built initramfs:" "$(wc -c < kernel-build/initramfs.img)"
-          printf "  %-25s %s bytes\n" "Merged ramdisk:" "$(wc -c < merged_ramdisk.img)"
+          printf "  %-25s %s bytes\n" "Single merged CPIO:" "$(wc -c < merged.cpio)"
+          printf "  %-25s %s bytes\n" "Final ramdisk (LZ4):" "$(wc -c < merged_ramdisk.img)"
           printf "  %-25s %s bytes\n" "Kernel (bzImage):" "$(wc -c < kernel-build/bzImage)"
           echo "============================================"
 
