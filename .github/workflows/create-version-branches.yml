@@ -241,125 +241,72 @@ jobs:
           fi
           cd ../..
 
-          # --- Step 2: Extract the stock ramdisk ---
+          # --- Step 2: Determine Stock Ramdisk Format ---
           echo ""
-          echo ">>> Step 2: Extracting stock ramdisk.img..."
-          mkdir -p work/stock
-          cd work/stock
-
+          echo ">>> Step 2: Determining stock ramdisk format..."
           STOCK="../../stock_ramdisk.img"
-          STOCK_MAGIC=$(xxd -l 4 -p "$STOCK")
+          STOCK_MAGIC=$(xxd -l 4 -p stock_ramdisk.img)
           echo "    Magic bytes: $STOCK_MAGIC"
 
           REPACK_FORMAT="lz4"
           if [[ "$STOCK_MAGIC" == 04224d18* ]] || [[ "$STOCK_MAGIC" == 02214c18* ]]; then
-            lz4 -dc "$STOCK" | fakeroot cpio -idm --quiet 2>&1 | grep -v "Cannot mknod" || true
+            echo "    Format: LZ4"
             REPACK_FORMAT="lz4"
           elif [[ "$STOCK_MAGIC" == 1f8b* ]]; then
-            gzip -dc "$STOCK" | fakeroot cpio -idm --quiet 2>&1 | grep -v "Cannot mknod" || true
+            echo "    Format: GZIP"
             REPACK_FORMAT="gzip"
           else
-            lz4 -dc "$STOCK" 2>/dev/null | fakeroot cpio -idm --quiet 2>/dev/null || true
+            echo "    ⚠️ Unknown magic. Defaulting to LZ4."
+            REPACK_FORMAT="lz4"
           fi
 
-          echo "    /init present: $([ -f init ] && echo 'YES ✅' || echo 'NO ❌')"
-          cd ../..
-
-          # --- Step 3: Merge ---
+          # --- Step 3: Create Overlay ---
           echo ""
-          echo ">>> Step 3: Merging modules into stock ramdisk..."
-          mkdir -p work/merged
-          cp -a work/stock/. work/merged/
+          echo ">>> Step 3: Creating kernel module overlay..."
+          mkdir -p work/overlay/lib/modules/0.0
+          
+          echo "    Flattening compiled .ko files into overlay..."
+          find work/built -name "*.ko" -exec cp {} work/overlay/lib/modules/0.0/ \;
+          echo "    .ko files: $(find work/overlay/lib/modules/0.0 -name '*.ko' | wc -l)"
 
-          # Verify stock fstab.ranchu exists (don't overwrite — stock one is correct)
-          if [ -f work/merged/first_stage_ramdisk/fstab.ranchu ]; then
-            echo "    ✅ Stock fstab.ranchu found in first_stage_ramdisk/ (preserving it)"
-          elif [ -f work/merged/fstab.ranchu ]; then
-            echo "    ✅ Stock fstab.ranchu found at ramdisk root (preserving it)"
-          else
-            echo "    ⚠️ No fstab.ranchu found — injecting fallback into first_stage_ramdisk/..."
-            mkdir -p work/merged/first_stage_ramdisk
-            printf '%s\n' \
-               "# Android fstab file." \
-               "#<dev>  <mnt_point> <type>  <mnt_flags options> <fs_mgr_flags>" \
-               "system   /system     ext4    ro,barrier=1     wait,logical,avb=vbmeta,first_stage_mount" \
-               "vendor   /vendor     ext4    ro,barrier=1     wait,logical,first_stage_mount" \
-               "product  /product    ext4    ro,barrier=1     wait,logical,first_stage_mount" \
-               "system_dlkm /system_dlkm erofs ro wait,logical,first_stage_mount" \
-               "system_ext  /system_ext  ext4   ro,barrier=1   wait,logical,first_stage_mount" \
-               "/dev/block/vdc   /data     ext4      noatime,nosuid,nodev,nomblk_io_submit,errors=panic   wait,check,quota,fileencryption=aes-256-xts:aes-256-cts,reservedsize=128M,fsverity,keydirectory=/metadata/vold/metadata_encryption,latemount" \
-               "/dev/block/pci/pci0000:00/0000:00:06.0/by-name/metadata    /metadata    ext4    noatime,nosuid,nodev    wait,formattable,first_stage_mount" \
-               "/devices/*/block/vdf auto   auto      defaults    voldmanaged=sdcard:auto,encryptable=userdata" \
-               "/dev/block/zram0 none swap  defaults zramsize=75%" \
-               > work/merged/first_stage_ramdisk/fstab.ranchu
-          fi
+          echo "    Running depmod to generate metadata..."
+          depmod -a -b work/overlay 0.0
 
-          if [ -d work/built/lib/modules ]; then
-            echo "    Copying entire /lib/modules tree (preserving kernel version directory)..."
-            mkdir -p work/merged/lib/modules
-            cp -a work/built/lib/modules/. work/merged/lib/modules/
-            echo "    .ko files: $(find work/merged/lib/modules -name '*.ko' | wc -l)"
-          else
-            echo "    ⚠️ No /lib/modules in built initramfs, copying flat..."
-            mkdir -p work/merged/lib/modules
-            find work/built -name "*.ko" -exec cp {} work/merged/lib/modules/ \;
-          fi
+          echo "    Moving files to root of /lib/modules/ for init fallback..."
+          mv work/overlay/lib/modules/0.0/* work/overlay/lib/modules/
+          rmdir work/overlay/lib/modules/0.0
 
-          KVER_DIR=$(find work/merged/lib/modules -mindepth 1 -maxdepth 1 -type d | head -1)
-          echo "    Kernel version dir: $KVER_DIR"
-
-          if [ -n "$KVER_DIR" ]; then
-            KVER=$(basename "$KVER_DIR")
-            echo "    Running depmod to generate proper module metadata (kernel: $KVER)..."
-            depmod -a -b work/merged "$KVER"
-            echo "    ✅ depmod completed — generated modules.dep, modules.alias, etc."
-
-            # Verify depmod output
-            for f in modules.dep modules.alias modules.symbols; do
-              if [ -f "$KVER_DIR/$f" ]; then
-                echo "    ✅ $f ($(wc -l < "$KVER_DIR/$f") lines)"
-              else
-                echo "    ⚠️ $f not generated"
+          echo "    Generating modules.load with correct load order..."
+          {
+            for m in virtio.ko virtio_ring.ko virtio_pci_modern_dev.ko \
+                     virtio_pci_legacy_dev.ko virtio_pci.ko \
+                     virtio_blk.ko virtio_net.ko virtio_console.ko \
+                     virtio_input.ko virtio_balloon.ko virtio_mmio.ko \
+                     virtio-gpu.ko virtio-rng.ko \
+                     goldfish_pipe.ko goldfish_address_space.ko \
+                     goldfish_sync.ko goldfish_battery.ko mac80211_hwsim.ko; do
+              if [ -f "work/overlay/lib/modules/$m" ]; then
+                echo "$m"
               fi
             done
+          } > work/overlay/lib/modules/modules.load
 
-            # Generate modules.load with proper dependency ordering
-            echo "    Generating modules.load with correct load order..."
-            {
-              for m in virtio.ko virtio_ring.ko virtio_pci_modern_dev.ko \
-                       virtio_pci_legacy_dev.ko virtio_pci.ko \
-                       virtio_blk.ko virtio_net.ko virtio_console.ko \
-                       virtio_input.ko virtio_balloon.ko virtio_mmio.ko \
-                       virtio-gpu.ko virtio-rng.ko \
-                       goldfish_pipe.ko goldfish_address_space.ko \
-                       goldfish_sync.ko goldfish_battery.ko mac80211_hwsim.ko; do
-                find "$KVER_DIR" -name "$m" -printf "%P\n" 2>/dev/null
-              done
-            } > "$KVER_DIR/modules.load"
-          fi
+          echo "    Overlay modules.load:"
+          cat work/overlay/lib/modules/modules.load | head -15 | sed 's/^/      /'
 
+          # --- Step 4: Repack Overlay and Append ---
           echo ""
-          echo "    modules.load:"
-          MODULES_LOAD=$(find work/merged/lib/modules -name "modules.load" | head -1)
-          [ -n "$MODULES_LOAD" ] && cat "$MODULES_LOAD" | head -15 | sed 's/^/      /' || echo "    ⚠️ NOT FOUND"
-
-          echo ""
-          echo ">>> Verification:"
-          for critical in virtio_blk.ko virtio_pci.ko; do
-            find work/merged/lib/modules -name "$critical" | grep -q . && echo "    ✅ $critical" || echo "    ❌ $critical MISSING"
-          done
-          [ -f work/merged/init ] && echo "    ✅ /init" || echo "    ❌ /init MISSING"
-
-          # --- Step 4: Repack ---
-          echo ""
-          echo ">>> Step 4: Repacking (format: $REPACK_FORMAT)..."
-          cd work/merged
-          if [ "$REPACK_FORMAT" = "gzip" ]; then
-            fakeroot sh -c 'find . | cpio -o -H newc --quiet' | gzip -9 > ../../merged_ramdisk.img
+          echo ">>> Step 4: Repacking overlay and appending to stock ramdisk..."
+          cd work/overlay
+          if [ "$REPACK_FORMAT" = "lz4" ]; then
+            fakeroot sh -c 'find . | cpio -o -H newc --quiet' | lz4 -l -12 --favor-decSpeed > ../overlay.img
           else
-            fakeroot sh -c 'find . | cpio -o -H newc --quiet' | lz4 -l -12 --favor-decSpeed > ../../merged_ramdisk.img
+            fakeroot sh -c 'find . | cpio -o -H newc --quiet' | gzip -9 > ../overlay.img
           fi
           cd ../..
+
+          echo "    Appending overlay to stock ramdisk..."
+          cat stock_ramdisk.img work/overlay.img > merged_ramdisk.img
 
           echo ""
           echo "============================================"
