@@ -109,7 +109,7 @@ jobs:
       - name: Install Tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq cpio lz4 unzip fakeroot
+          sudo apt-get install -y -qq cpio lz4 unzip fakeroot kmod
 
       # Download kernel build artifacts (from this run or previous run)
       - name: Download Kernel Build (Current Run)
@@ -140,6 +140,14 @@ jobs:
           fi
           echo "✅ bzImage: $(wc -c < kernel-build/bzImage) bytes"
           echo "✅ initramfs.img: $(wc -c < kernel-build/initramfs.img) bytes"
+
+      # Download cached stock ramdisk BEFORE we try to use it
+      - name: Try Download Stock Ramdisk Cache
+        uses: actions/download-artifact@v4
+        with:
+          name: stock-ramdisk-cache
+          path: stock-ramdisk-cache/
+        continue-on-error: true
 
       # Try to get stock ramdisk from cache, then SDK, then download
       - name: Obtain Stock Ramdisk
@@ -194,14 +202,6 @@ jobs:
             echo "❌ Could not obtain stock ramdisk!"
             exit 1
           fi
-
-      # Try to download cached stock ramdisk from build job
-      - name: Try Download Stock Ramdisk Cache
-        uses: actions/download-artifact@v4
-        with:
-          name: stock-ramdisk-cache
-          path: stock-ramdisk-cache/
-        continue-on-error: true
 
       - name: Merge Kernel Modules into Stock Ramdisk
         run: |
@@ -270,22 +270,28 @@ jobs:
           mkdir -p work/merged
           cp -a work/stock/. work/merged/
 
-          echo "    Injecting fstab.ranchu to ramdisk root..."
-          cat << 'EOF' > work/merged/fstab.ranchu
-          # Android fstab file.
-          #<dev>  <mnt_point> <type>  <mnt_flags options> <fs_mgr_flags>
-          system   /system     ext4    ro,barrier=1     wait,logical,avb=vbmeta,first_stage_mount
-          vendor   /vendor     ext4    ro,barrier=1     wait,logical,first_stage_mount
-          product  /product    ext4    ro,barrier=1     wait,logical,first_stage_mount
-          system_dlkm /system_dlkm erofs ro wait,logical,first_stage_mount
-          system_ext  /system_ext  ext4   ro,barrier=1   wait,logical,first_stage_mount
-          /dev/block/vdc   /data     ext4      noatime,nosuid,nodev,nomblk_io_submit,errors=panic   wait,check,quota,fileencryption=aes-256-xts:aes-256-cts,reservedsize=128M,fsverity,keydirectory=/metadata/vold/metadata_encryption,latemount
-          /dev/block/pci/pci0000:00/0000:00:06.0/by-name/metadata    /metadata    ext4    noatime,nosuid,nodev    wait,formattable,first_stage_mount
-          /devices/*/block/vdf auto   auto      defaults    voldmanaged=sdcard:auto,encryptable=userdata
-          /dev/block/zram0 none swap  defaults zramsize=75%
-          EOF
-          # Strip leading indentation from the injected file
-          sed -i 's/^[ \t]*//' work/merged/fstab.ranchu
+          # Verify stock fstab.ranchu exists (don't overwrite — stock one is correct)
+          if [ -f work/merged/first_stage_ramdisk/fstab.ranchu ]; then
+            echo "    ✅ Stock fstab.ranchu found in first_stage_ramdisk/ (preserving it)"
+          elif [ -f work/merged/fstab.ranchu ]; then
+            echo "    ✅ Stock fstab.ranchu found at ramdisk root (preserving it)"
+          else
+            echo "    ⚠️ No fstab.ranchu found — injecting fallback into first_stage_ramdisk/..."
+            mkdir -p work/merged/first_stage_ramdisk
+            cat << 'EOF' > work/merged/first_stage_ramdisk/fstab.ranchu
+# Android fstab file.
+#<dev>  <mnt_point> <type>  <mnt_flags options> <fs_mgr_flags>
+system   /system     ext4    ro,barrier=1     wait,logical,avb=vbmeta,first_stage_mount
+vendor   /vendor     ext4    ro,barrier=1     wait,logical,first_stage_mount
+product  /product    ext4    ro,barrier=1     wait,logical,first_stage_mount
+system_dlkm /system_dlkm erofs ro wait,logical,first_stage_mount
+system_ext  /system_ext  ext4   ro,barrier=1   wait,logical,first_stage_mount
+/dev/block/vdc   /data     ext4      noatime,nosuid,nodev,nomblk_io_submit,errors=panic   wait,check,quota,fileencryption=aes-256-xts:aes-256-cts,reservedsize=128M,fsverity,keydirectory=/metadata/vold/metadata_encryption,latemount
+/dev/block/pci/pci0000:00/0000:00:06.0/by-name/metadata    /metadata    ext4    noatime,nosuid,nodev    wait,formattable,first_stage_mount
+/devices/*/block/vdf auto   auto      defaults    voldmanaged=sdcard:auto,encryptable=userdata
+/dev/block/zram0 none swap  defaults zramsize=75%
+EOF
+          fi
 
           if [ -d work/built/lib/modules ]; then
             echo "    Copying entire /lib/modules tree (preserving kernel version directory)..."
@@ -302,23 +308,33 @@ jobs:
           echo "    Kernel version dir: $KVER_DIR"
 
           if [ -n "$KVER_DIR" ]; then
-            echo "    Forcing sequential modules.load and mock modules.dep..."
-            
-            # Generate modules.load in exact sequential order
+            KVER=$(basename "$KVER_DIR")
+            echo "    Running depmod to generate proper module metadata (kernel: $KVER)..."
+            depmod -a -b work/merged "$KVER"
+            echo "    ✅ depmod completed — generated modules.dep, modules.alias, etc."
+
+            # Verify depmod output
+            for f in modules.dep modules.alias modules.symbols; do
+              if [ -f "$KVER_DIR/$f" ]; then
+                echo "    ✅ $f ($(wc -l < "$KVER_DIR/$f") lines)"
+              else
+                echo "    ⚠️ $f not generated"
+              fi
+            done
+
+            # Generate modules.load with proper dependency ordering
+            echo "    Generating modules.load with correct load order..."
             {
-              for m in virtio.ko virtio_ring.ko; do find "$KVER_DIR" -name "$m" -printf "%P\n" 2>/dev/null; done
-              for m in virtio_pci_modern_dev.ko virtio_pci_legacy_dev.ko virtio_pci.ko; do find "$KVER_DIR" -name "$m" -printf "%P\n" 2>/dev/null; done
-              for m in virtio_blk.ko virtio_net.ko virtio_console.ko virtio_input.ko virtio_balloon.ko virtio_mmio.ko virtio-gpu.ko virtio-rng.ko; do find "$KVER_DIR" -name "$m" -printf "%P\n" 2>/dev/null; done
-              for m in goldfish_pipe.ko goldfish_address_space.ko goldfish_sync.ko goldfish_battery.ko mac80211_hwsim.ko; do find "$KVER_DIR" -name "$m" -printf "%P\n" 2>/dev/null; done
+              for m in virtio.ko virtio_ring.ko virtio_pci_modern_dev.ko \
+                       virtio_pci_legacy_dev.ko virtio_pci.ko \
+                       virtio_blk.ko virtio_net.ko virtio_console.ko \
+                       virtio_input.ko virtio_balloon.ko virtio_mmio.ko \
+                       virtio-gpu.ko virtio-rng.ko \
+                       goldfish_pipe.ko goldfish_address_space.ko \
+                       goldfish_sync.ko goldfish_battery.ko mac80211_hwsim.ko; do
+                find "$KVER_DIR" -name "$m" -printf "%P\n" 2>/dev/null
+              done
             } > "$KVER_DIR/modules.load"
-            
-            # Pick the first valid built-in module as a dummy dependency
-            DUMMY=$(grep -v '^#' "$KVER_DIR/modules.builtin" | head -n 1)
-            echo "    Dummy dependency used: $DUMMY"
-            
-            # Generate a mock modules.dep where EVERY module depends on the built-in dummy
-            # This completely bypasses the libmodprobe parsing bugs.
-            find "$KVER_DIR" -name "*.ko" -printf "%P: $DUMMY\n" > "$KVER_DIR/modules.dep"
           fi
 
           echo ""
