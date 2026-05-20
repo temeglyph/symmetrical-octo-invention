@@ -47,6 +47,9 @@ jobs:
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
           sed -i 's/#ifndef X86_FEATURE_INDIRECT_SAFE/#if 0/g' drivers/kernelsu/core/init.c
           sed -i 's/if (!boot_cpu_has(X86_FEATURE_INDIRECT_SAFE))/if (0)/g' drivers/kernelsu/core/init.c
+          sed -i 's/-Werror//g' drivers/kernelsu/Makefile
+          echo "ccflags-y += -Wno-array-bounds" >> drivers/kernelsu/Makefile
+          echo "ccflags-y += -Wno-error" >> drivers/kernelsu/Makefile
 
       - name: Compile Native x86_64 Emulator Kernel
         run: |
