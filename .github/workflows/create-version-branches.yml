@@ -11,7 +11,7 @@ on:
 
 jobs:
   build-kernel:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     # Skip this job entirely if we're reusing a previous build
     if: ${{ github.event.inputs.skip_kernel_build != 'true' }}
     steps:
