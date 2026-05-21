@@ -49,8 +49,8 @@ jobs:
           # --- Fix 0: Ensure KernelSU git tags are available for version detection ---
           cd KernelSU && git fetch --tags && cd ..
 
-          # Determine the correct version number from git tags (same logic KernelSU build uses)
-          KSU_VERSION=$(cd KernelSU && expr 10000 + $(git rev-list --count HEAD) + 200)
+          # Determine the correct version number from git tags (same logic KernelSU main uses)
+          KSU_VERSION=$(cd KernelSU && expr 30000 + $(git rev-list --count HEAD))
           echo ">>> KernelSU version number: $KSU_VERSION"
 
           # --- Fix 1: x86 feature guard (existing) ---
@@ -63,7 +63,7 @@ jobs:
           # --- Fix 3: Disable CONFIG_WERROR globally in the kernel defconfig ---
           sed -i 's/CONFIG_WERROR=y/# CONFIG_WERROR is not set/' arch/x86/configs/gki_defconfig
 
-          # --- Fix 4: Add -Wno-error to Kbuild and fix KSU_GIT_VERSION ---
+          # --- Fix 4: Add -Wno-error to Kbuild and fix KSU_VERSION ---
           for f in drivers/kernelsu/Makefile drivers/kernelsu/Kbuild; do
             if [ -f "$f" ]; then
               sed -i 's/-Werror//g' "$f"
@@ -71,7 +71,7 @@ jobs:
             fi
           done
           # Override the fallback version 16 with our dynamically calculated KSU_VERSION
-          sed -i "s/-DKSU_GIT_VERSION=\\\"[^\"]*\\\"/-DKSU_GIT_VERSION=\\\"$KSU_VERSION\\\"/g" drivers/kernelsu/Kbuild
+          sed -i "s/-DKSU_VERSION=16/-DKSU_VERSION=$KSU_VERSION/g" drivers/kernelsu/Kbuild
 
       - name: Compile Native x86_64 Emulator Kernel
         run: |
