@@ -64,6 +64,27 @@ jobs:
             fi
           done
 
+          # --- Fix 5: Force correct KSU version in kernel module ---
+          # The Bazel build environment breaks Git detection in the Kbuild, causing
+          # KSU_VERSION to fall back to 1 and KSU_VERSION_TAG to "v0.0.1".
+          # The Manager checks the kernel module version and refuses to work if it's wrong.
+          # We force the correct values matching the v3.2.0 release (version code 33129).
+          sed -i 's/^\(KSU_VERSION\s*:=\s*\).*$/\133129/' drivers/kernelsu/Kbuild
+          sed -i 's/^\(KSU_VERSION_TAG\s*:=\s*\).*$/\1v3.2.0/' drivers/kernelsu/Kbuild
+
+          # --- Fix 6: Force SELinux policy patching from init.rc hook (x86_64 AVD fallback) ---
+          # On x86_64 AVD, the execve hook never detects init's second_stage re-exec,
+          # so apply_kernelsu_rules() is never called and ksud aborts at boot (exit 6).
+          # This patch calls the SELinux setup from the init.rc read path as a fallback.
+          sed -i '/pr_info("read init.rc/a \
+\tif (!init_second_stage_executed) {\
+\t\tpr_info("x86_64 AVD fallback: applying KernelSU rules from init.rc hook\\n");\
+\t\tapply_kernelsu_rules();\
+\t\tcache_sid();\
+\t\tsetup_ksu_cred();\
+\t\tinit_second_stage_executed = true;\
+\t}' drivers/kernelsu/runtime/ksud_integration.c
+
       - name: Compile Native x86_64 Emulator Kernel
         run: |
           cd kernel_workspace
