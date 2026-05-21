@@ -91,6 +91,17 @@ jobs:
           PATCH
           sed -i '/pr_info("read init.rc/r /tmp/ksu_selinux_fallback.c' drivers/kernelsu/runtime/ksud_integration.c
 
+          # --- Fix 7: Grant init permission to execute ksud (adb_data_file context) ---
+          # Even after SELinux policy is patched, init still needs explicit permission
+          # to execute /data/adb/ksud which has the adb_data_file label.
+          # We add allow rules for init to read/execute adb_data_file right after
+          # the existing apply_kernelsu_rules() grants in rules.c.
+          cat > /tmp/ksu_init_exec_fix.c << 'PATCH'
+          	ksu_allow(db, "init", "adb_data_file", "file", ALL);
+          	ksu_allow(db, "init", "adb_data_file", "dir", ALL);
+          PATCH
+          sed -i '/reset_avc_cache/r /tmp/ksu_init_exec_fix.c' drivers/kernelsu/selinux/rules.c
+
       - name: Compile Native x86_64 Emulator Kernel
         run: |
           cd kernel_workspace
