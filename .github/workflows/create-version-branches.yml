@@ -44,7 +44,7 @@ jobs:
       - name: Inject Official KernelSU
         run: |
           cd kernel_workspace/common
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v3.2.4
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
 
           # --- Fix 0: Ensure KernelSU git tags are available for version detection ---
           cd KernelSU && git fetch --tags && cd ..
@@ -72,9 +72,6 @@ jobs:
           done
           # Override the fallback version 16 with our dynamically calculated KSU_VERSION
           sed -i "s/-DKSU_GIT_VERSION=\\\"[^\"]*\\\"/-DKSU_GIT_VERSION=\\\"$KSU_VERSION\\\"/g" drivers/kernelsu/Kbuild
-
-          # --- Fix 5: Remove untagged_addr which is undefined on this x86_64 kernel ---
-          sed -i 's/untagged_addr(//g; s/filename_user)/filename_user/g; s/arg_user)/arg_user/g' drivers/kernelsu/sulog/event.c
 
       - name: Compile Native x86_64 Emulator Kernel
         run: |
