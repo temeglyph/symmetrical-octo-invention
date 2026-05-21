@@ -49,8 +49,8 @@ jobs:
           # --- Fix 0: Ensure KernelSU git tags are available for version detection ---
           cd KernelSU && git fetch --tags && cd ..
 
-          # Determine the correct version number from git tags (same logic KernelSU v3.2.4 uses)
-          KSU_VERSION=$(cd KernelSU && expr 10000 + $(git rev-list --count HEAD) + 200)
+          # Determine the correct version number (same formula as v3.2.4 Kbuild: 30000 + git commit count)
+          KSU_VERSION=$(cd KernelSU && expr 30000 + $(git rev-list --count HEAD))
           echo ">>> KernelSU version number: $KSU_VERSION"
 
           # --- Fix 1: x86 feature guard (existing) ---
@@ -71,7 +71,17 @@ jobs:
             fi
           done
           # Override the fallback version 16 with our dynamically calculated KSU_VERSION
-          sed -i "s/-DKSU_GIT_VERSION=\\\"[^\"]*\\\"/-DKSU_GIT_VERSION=\\\"$KSU_VERSION\\\"/g" drivers/kernelsu/Kbuild
+          # The actual text in v3.2.4 Kbuild is: ccflags-y += -DKSU_VERSION=16  (no quotes, no _GIT_)
+          sed -i "s/-DKSU_VERSION=16/-DKSU_VERSION=$KSU_VERSION/g" drivers/kernelsu/Kbuild
+
+          # --- Verification: fail fast if version patch didn't work ---
+          echo ">>> Verifying KSU_VERSION was patched in Kbuild:"
+          grep -n "KSU_VERSION" drivers/kernelsu/Kbuild | tail -5
+          if grep -q "DKSU_VERSION=16" drivers/kernelsu/Kbuild; then
+            echo "ERROR: KSU_VERSION is still 16! The sed patch failed."
+            exit 1
+          fi
+          echo ">>> Version patch verified successfully."
 
           # --- Fix 5: Safely remove untagged_addr which is undefined on this x86_64 kernel ---
           sed -i 's/untagged_addr((unsigned long)filename_user)/((unsigned long)filename_user)/g' drivers/kernelsu/sulog/event.c
