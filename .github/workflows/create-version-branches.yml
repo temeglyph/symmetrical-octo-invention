@@ -44,7 +44,14 @@ jobs:
       - name: Inject Official KernelSU
         run: |
           cd kernel_workspace/common
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v3.2.4
+
+          # --- Fix 0: Ensure KernelSU git tags are available for version detection ---
+          cd KernelSU && git fetch --tags && cd ..
+
+          # Determine the correct version number from git tags (same logic KernelSU build uses)
+          KSU_VERSION=$(cd KernelSU && expr 10000 + $(git rev-list --count HEAD) + 200)
+          echo ">>> KernelSU version number: $KSU_VERSION"
 
           # --- Fix 1: x86 feature guard (existing) ---
           sed -i 's/#ifndef X86_FEATURE_INDIRECT_SAFE/#if 0/g' drivers/kernelsu/core/init.c
@@ -56,11 +63,12 @@ jobs:
           # --- Fix 3: Disable CONFIG_WERROR globally in the kernel defconfig ---
           sed -i 's/CONFIG_WERROR=y/# CONFIG_WERROR is not set/' arch/x86/configs/gki_defconfig
 
-          # --- Fix 4: Add -Wno-error to BOTH Makefile and Kbuild (kernel prefers Kbuild) ---
+          # --- Fix 4: Add -Wno-error and force correct KSU_GIT_VERSION to Kbuild ---
           for f in drivers/kernelsu/Makefile drivers/kernelsu/Kbuild; do
             if [ -f "$f" ]; then
               sed -i 's/-Werror//g' "$f"
               echo "ccflags-y += -Wno-error -Wno-array-bounds -Wno-implicit-function-declaration" >> "$f"
+              echo "ccflags-y += -DKSU_GIT_VERSION=$KSU_VERSION" >> "$f"
             fi
           done
 
