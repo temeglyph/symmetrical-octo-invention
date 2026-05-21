@@ -76,14 +76,16 @@ jobs:
           # On x86_64 AVD, the execve hook never detects init's second_stage re-exec,
           # so apply_kernelsu_rules() is never called and ksud aborts at boot (exit 6).
           # This patch calls the SELinux setup from the init.rc read path as a fallback.
-          sed -i '/pr_info("read init.rc/a \
-\tif (!init_second_stage_executed) {\
-\t\tpr_info("x86_64 AVD fallback: applying KernelSU rules from init.rc hook\\n");\
-\t\tapply_kernelsu_rules();\
-\t\tcache_sid();\
-\t\tsetup_ksu_cred();\
-\t\tinit_second_stage_executed = true;\
-\t}' drivers/kernelsu/runtime/ksud_integration.c
+          cat > /tmp/ksu_selinux_fallback.c << 'PATCH'
+          	if (!init_second_stage_executed) {
+          		pr_info("x86_64 AVD fallback: applying KernelSU rules from init.rc hook\n");
+          		apply_kernelsu_rules();
+          		cache_sid();
+          		setup_ksu_cred();
+          		init_second_stage_executed = true;
+          	}
+          PATCH
+          sed -i '/pr_info("read init.rc/r /tmp/ksu_selinux_fallback.c' drivers/kernelsu/runtime/ksud_integration.c
 
       - name: Compile Native x86_64 Emulator Kernel
         run: |
