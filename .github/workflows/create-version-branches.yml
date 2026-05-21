@@ -96,11 +96,13 @@ jobs:
           # to execute /data/adb/ksud which has the adb_data_file label.
           # We add allow rules for init to read/execute adb_data_file right after
           # the existing apply_kernelsu_rules() grants in rules.c.
+          # NOTE: We match the unique "sigkill" line (last ksu_allow in apply_kernelsu_rules)
+          # to avoid accidentally inserting into the reset_avc_cache function definition.
           cat > /tmp/ksu_init_exec_fix.c << 'PATCH'
           	ksu_allow(db, "init", "adb_data_file", "file", ALL);
           	ksu_allow(db, "init", "adb_data_file", "dir", ALL);
           PATCH
-          sed -i '/reset_avc_cache/r /tmp/ksu_init_exec_fix.c' drivers/kernelsu/selinux/rules.c
+          sed -i '/"process", "sigkill"/r /tmp/ksu_init_exec_fix.c' drivers/kernelsu/selinux/rules.c
 
       - name: Compile Native x86_64 Emulator Kernel
         run: |
