@@ -63,14 +63,18 @@ jobs:
           # --- Fix 3: Disable CONFIG_WERROR globally in the kernel defconfig ---
           sed -i 's/CONFIG_WERROR=y/# CONFIG_WERROR is not set/' arch/x86/configs/gki_defconfig
 
-          # --- Fix 4: Add -Wno-error and force correct KSU_GIT_VERSION to Kbuild ---
+          # --- Fix 4: Add -Wno-error to Kbuild and fix KSU_GIT_VERSION ---
           for f in drivers/kernelsu/Makefile drivers/kernelsu/Kbuild; do
             if [ -f "$f" ]; then
               sed -i 's/-Werror//g' "$f"
               echo "ccflags-y += -Wno-error -Wno-array-bounds -Wno-implicit-function-declaration" >> "$f"
-              echo "ccflags-y += -DKSU_GIT_VERSION=$KSU_VERSION" >> "$f"
             fi
           done
+          # Override the fallback version 16 with our dynamically calculated KSU_VERSION
+          sed -i "s/-DKSU_GIT_VERSION=\\\"[^\"]*\\\"/-DKSU_GIT_VERSION=\\\"$KSU_VERSION\\\"/g" drivers/kernelsu/Kbuild
+
+          # --- Fix 5: Remove untagged_addr which is undefined on this x86_64 kernel ---
+          sed -i 's/untagged_addr(//g; s/filename_user)/filename_user/g; s/arg_user)/arg_user/g' drivers/kernelsu/sulog/event.c
 
       - name: Compile Native x86_64 Emulator Kernel
         run: |
