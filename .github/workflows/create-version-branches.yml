@@ -44,7 +44,7 @@ jobs:
       - name: Inject KernelSU-Next
         run: |
           cd kernel_workspace/common
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/main/kernel/setup.sh" | bash -s next
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
 
           # --- Fix 1: x86 feature guard (existing) ---
           sed -i 's/#ifndef X86_FEATURE_INDIRECT_SAFE/#if 0/g' drivers/kernelsu/core/init.c
