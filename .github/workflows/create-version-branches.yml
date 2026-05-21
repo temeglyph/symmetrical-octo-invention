@@ -68,9 +68,10 @@ jobs:
           # The Bazel build environment breaks Git detection in the Kbuild, causing
           # KSU_VERSION to fall back to 1 and KSU_VERSION_TAG to "v0.0.1".
           # The Manager checks the kernel module version and refuses to work if it's wrong.
-          # We force the values by prepending overrides before the ifndef guards.
-          sed -i '1i KSU_VERSION := 33129' drivers/kernelsu/Kbuild
-          sed -i '2i KSU_VERSION_TAG := v3.2.0' drivers/kernelsu/Kbuild
+          # We replace the fallback values directly so even when git fails, the correct
+          # version (33129) and tag (v3.2.0) are used.
+          sed -i 's/KSU_VERSION := 1/KSU_VERSION := 33129/' drivers/kernelsu/Kbuild
+          sed -i 's/v0.0.1/v3.2.0/' drivers/kernelsu/Kbuild
 
           # --- Fix 6: Force SELinux policy patching from init.rc hook (x86_64 AVD fallback) ---
           # On x86_64 AVD, the execve hook never detects init's second_stage re-exec,
